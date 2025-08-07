@@ -2,7 +2,7 @@ import "../styles/globals.css";
 import type { AppProps } from "next/app";
 import Head from "next/head";
 import { PrivyProvider } from "@privy-io/react-auth";
-import { odysseyTestnet } from "viem/chains";
+import { sepolia } from "viem/chains";
 
 function MyApp({ Component, pageProps }: AppProps) {
   return (
@@ -48,7 +48,7 @@ function MyApp({ Component, pageProps }: AppProps) {
             showWalletUIs: false,
             createOnLogin: "all-users",
           },
-          supportedChains: [odysseyTestnet],
+          supportedChains: [sepolia],
         }}
       >
         <Component {...pageProps} />
