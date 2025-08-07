@@ -7,167 +7,203 @@ import {
   zeroAddress,
   encodeFunctionData,
 } from "viem";
-import { signerToEcdsaValidator } from "@zerodev/ecdsa-validator";
 import {
   getEntryPoint,
   KERNEL_V3_3,
-  KernelVersionToAddressesMap,
 } from "@zerodev/sdk/constants";
 import {
   createKernelAccount,
   createKernelAccountClient,
   createZeroDevPaymasterClient,
-  KernelAccountClient,
 } from "@zerodev/sdk";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { sepolia } from "viem/chains";
-import { useSignAuthorization, useWallets } from "@privy-io/react-auth";
+import { sepolia, arbitrumSepolia } from "viem/chains";
+import { useWallets } from "@privy-io/react-auth";
 import { useState, useEffect } from "react";
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { erc20Abi, parseUnits } from "viem";
-import { toPermissionValidator } from "@zerodev/permissions";
+import { deserializePermissionAccount, serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
+import { Chain } from "viem";
 
-const bundlerRpc = process.env.NEXT_PUBLIC_BUNDLER_RPC;
+// Chain configuration type
+interface ChainConfig {
+  configId: number; // Unique identifier for this configuration
+  name: string;
+  chain: Chain;
+  bundlerRpc: string;
+  paymasterRpc: string;
+  tokenAddress: string;
+  tokenDecimals: number;
+  receiver: string;
+}
 
-const paymasterRpc = process.env.NEXT_PUBLIC_PAYMASTER_RPC;
+// Multi-chain configuration
+const CHAIN_CONFIGS: ChainConfig[] = [
+  {
+    configId: 1,
+    name: "Sepolia",
+    chain: sepolia,
+    bundlerRpc: process.env.NEXT_PUBLIC_SEPOLIA_BUNDLER_RPC || "",
+    paymasterRpc: process.env.NEXT_PUBLIC_SEPOLIA_PAYMASTER_RPC || "",
+    tokenAddress: "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF",
+    tokenDecimals: 6,
+    receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
+  },
+  {
+    configId: 2,
+    name: "Arbitrum Sepolia",
+    chain: arbitrumSepolia,
+    bundlerRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_BUNDLER_RPC || "",
+    paymasterRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_PAYMASTER_RPC || "",
+    tokenAddress: "0x5E2522c505A543fA2714c617E3Cd133a6Daa9627", // USDC on Arbitrum Sepolia
+    tokenDecimals: 6,
+    receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
+  },
+];
 
-const TOKEN_ADDRESS = "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF";
-const TOKEN_DECIMALS = 6;
-const RECEIVER = "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8";
-
-const chain = sepolia;
 const kernelVersion = KERNEL_V3_3;
 const entryPoint = getEntryPoint("0.7");
-const publicClient = createPublicClient({
-  chain,
-  transport: http(),
-});
 
 export const Zerodev = () => {
   const { wallets } = useWallets();
   const [loading, setLoading] = useState(false);
   const [sendingTx, setSendingTx] = useState(false);
   const [amount, setAmount] = useState<string>("");
-  const [sessionKernelClient, setSessionKernelClient] = useState<KernelAccountClient | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
-  const [balance, setBalance] = useState<string>("0");
-  const [tokenName, setTokenName] = useState<string>("Token");
 
-  const embeddedWallet = wallets.find(
+  // Multi-chain states
+  const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_CONFIGS[0].configId);
+  const [balances, setBalances] = useState<Record<number, { balance: string; tokenName: string }>>({});
+  const [selectedChainForTx, setSelectedChainForTx] = useState<number>(CHAIN_CONFIGS[0].configId);
+
+  // States for frontend/backend separation
+  const [generatedSessionKey, setGeneratedSessionKey] = useState<string>("");
+  const [generatedApproval, setGeneratedApproval] = useState<string>("");
+  const [inputSessionKey, setInputSessionKey] = useState<string>("");
+  const [inputApproval, setInputApproval] = useState<string>("");
+
+  // Find the embedded wallet
+  const privyEmbeddedWallet = wallets.find(
     (wallet) => wallet.walletClientType === "privy"
   );
 
-  const { signAuthorization } = useSignAuthorization();
+  // Function to fetch token balance and name for all chains
+  const fetchAllBalances = async () => {
+    if (!privyEmbeddedWallet?.address) return;
 
-  // Function to fetch token balance and name
-  const fetchBalance = async () => {
-    if (!embeddedWallet?.address) return;
+    const newBalances: Record<number, { balance: string; tokenName: string }> = {};
 
-    try {
-      // Fetch balance and token name in parallel
-      const [balance, name] = await Promise.all([
-        publicClient.readContract({
-          address: TOKEN_ADDRESS,
-          abi: erc20Abi,
-          functionName: 'balanceOf',
-          args: [embeddedWallet.address as `0x${string}`],
-        }),
-        publicClient.readContract({
-          address: TOKEN_ADDRESS,
-          abi: erc20Abi,
-          functionName: 'name',
-        })
-      ]);
+    // Fetch balances for all chains in parallel
+    await Promise.all(
+      CHAIN_CONFIGS.map(async (chainConfig) => {
+        try {
+          const publicClient = createPublicClient({
+            chain: chainConfig.chain,
+            transport: http(),
+          });
 
-      // Convert balance from wei to readable format
-      const formattedBalance = (Number(balance) / Math.pow(10, TOKEN_DECIMALS)).toFixed(6);
-      setBalance(formattedBalance);
-      setTokenName(name as string);
-    } catch (error) {
-      console.error("Failed to fetch balance:", error);
-      setBalance("Error");
-    }
+          const [balance, name] = await Promise.all([
+            publicClient.readContract({
+              address: chainConfig.tokenAddress as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'balanceOf',
+              args: [privyEmbeddedWallet.address as `0x${string}`],
+            }),
+            publicClient.readContract({
+              address: chainConfig.tokenAddress as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'name',
+            })
+          ]);
+
+          // Convert balance from wei to readable format
+          const formattedBalance = (Number(balance) / Math.pow(10, chainConfig.tokenDecimals)).toFixed(6);
+          newBalances[chainConfig.configId] = {
+            balance: formattedBalance,
+            tokenName: name as string,
+          };
+        } catch (error) {
+          console.error(`Failed to fetch balance for ${chainConfig.name}:`, error);
+          newBalances[chainConfig.configId] = {
+            balance: "Error",
+            tokenName: "Token",
+          };
+        }
+      })
+    );
+
+    setBalances(newBalances);
   };
 
   // Effect to fetch balance every 5 seconds
   useEffect(() => {
-    if (embeddedWallet?.address) {
-      fetchBalance(); // Initial fetch
+    if (privyEmbeddedWallet?.address) {
+      fetchAllBalances(); // Initial fetch
 
       const interval = setInterval(() => {
-        fetchBalance();
+        fetchAllBalances();
       }, 5000); // Refresh every 5 seconds
 
       return () => clearInterval(interval);
     }
-  }, [embeddedWallet?.address]);
+  }, [privyEmbeddedWallet?.address]);
 
-  const createSessionKey = async () => {
-    if (!embeddedWallet) {
-      console.error("❌ No embedded wallet found");
-      alert(`No embedded wallet found. Available wallet types: ${wallets.map(w => w.walletClientType).join(', ')}. Please connect your wallet first.`);
-      return;
-    }
+  // Helper function to get current chain config
+  const getCurrentChainConfig = () => {
+    return CHAIN_CONFIGS.find(config => config.configId === selectedChainId) || CHAIN_CONFIGS[0];
+  };
 
-    if (!bundlerRpc || !paymasterRpc) {
-      console.error("❌ Missing required environment variables");
-      alert("Missing required environment variables. Check NEXT_PUBLIC_BUNDLER_RPC and NEXT_PUBLIC_PAYMASTER_RPC");
-      return;
-    }
+  const getTxChainConfig = () => {
+    return CHAIN_CONFIGS.find(config => config.configId === selectedChainForTx) || CHAIN_CONFIGS[0];
+  };
 
+  // Early return conditions after all hooks have been called
+  if (!privyEmbeddedWallet) {
+    console.error("❌ No embedded wallet found");
+    // alert(`No embedded wallet found. Available wallet types: ${wallets.map(w => w.walletClientType).join(', ')}. Please connect your wallet first.`);
+    return null;
+  }
+
+  // Check if at least one chain has valid RPC configuration
+  const hasValidChainConfig = CHAIN_CONFIGS.some(config => config.bundlerRpc && config.paymasterRpc);
+  if (!hasValidChainConfig) {
+    console.error("❌ Missing required environment variables for all chains");
+    alert("Missing required environment variables. Please check your chain RPC configurations.");
+    return null;
+  }
+
+  const frontEndGenerateApproval = async () => {
     setLoading(true);
 
     try {
-      const ethereumProvider = await embeddedWallet.getEthereumProvider();
+      const chainConfig = getCurrentChainConfig();
 
-      const walletClient = createWalletClient({
-        // Use any Viem-compatible EOA account
-        account: embeddedWallet.address as Hex,
-        // We use the Sepolia here, but you can use any network that
-        // supports EIP-7702.
-        chain,
-        transport: custom(ethereumProvider),
+      // Create public client for selected chain
+      const publicClient = createPublicClient({
+        chain: chainConfig.chain,
+        transport: http(),
       });
 
-      const authorization = await signAuthorization({
-        contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
-        chainId: chain.id,
+      // Step1: Upgrade privy EOA to smart account
+      const privyWallet = createWalletClient({
+        account: privyEmbeddedWallet.address as Hex,
+        chain: chainConfig.chain,
+        transport: custom(await privyEmbeddedWallet.getEthereumProvider()),
       });
 
-      const kernelAccount = await createKernelAccount(publicClient, {
-        eip7702Account: walletClient,
-        entryPoint,
-        kernelVersion,
-        eip7702Auth: authorization,
-      });
-
-      const masterKernelAccountClient = createKernelAccountClient({
-        account: kernelAccount,
-        chain,
-        bundlerTransport: http(bundlerRpc),
-        paymaster: createZeroDevPaymasterClient({
-          chain,
-          transport: http(paymasterRpc),
-        }),
-        client: publicClient,
-      });
-
-
-      // Create Session Key ---------------
-      const _sessionPrivateKey = generatePrivateKey();
-
-      const sessionAccount = privateKeyToAccount(_sessionPrivateKey as `0x${string}`);
-
+      // Step2: Create session key
+      const sessionPrivateKey = generatePrivateKey();
       const sessionKeySigner = await toECDSASigner({
-        signer: sessionAccount,
+        signer: privateKeyToAccount(sessionPrivateKey),
       });
 
+      // Step3: Prepare call policy
       const callPolicy = toCallPolicy({
         policyVersion: CallPolicyVersion.V0_0_4,
         permissions: [
           {
-            target: TOKEN_ADDRESS,
+            target: chainConfig.tokenAddress as `0x${string}`,
             valueLimit: BigInt(0),
             abi: erc20Abi,
             functionName: "transfer",
@@ -185,46 +221,39 @@ export const Zerodev = () => {
         ],
       });
 
+      // Step4: Approve session key
       const permissionPlugin = await toPermissionValidator(publicClient, {
-        entryPoint: entryPoint,
-        kernelVersion: kernelVersion,
+        entryPoint,
+        kernelVersion,
         signer: sessionKeySigner,
         policies: [callPolicy],
       });
 
-      const sessionKeyKernelAccount = await createKernelAccount(publicClient, {
+      const sessionKeyAccount = await createKernelAccount(publicClient, {
         entryPoint,
-        eip7702Account: walletClient,
+        kernelVersion,
+        eip7702Account: privyWallet,
         plugins: {
           regular: permissionPlugin,
         },
-        kernelVersion: kernelVersion,
-        address: masterKernelAccountClient.account.address,
       });
 
-      const sessionKeyKernelAccountClient = createKernelAccountClient({
-        account: sessionKeyKernelAccount,
-        chain,
-        bundlerTransport: http(bundlerRpc),
-        paymaster: {
-          getPaymasterData(userOperation) {
-            return createZeroDevPaymasterClient({
-              chain,
-              transport: http(paymasterRpc),
-            }).sponsorUserOperation({ userOperation });
-          },
-        },
-      });
+      const approval = await serializePermissionAccount(sessionKeyAccount);
 
-      setSessionKernelClient(sessionKeyKernelAccountClient);
+      // Save generated data for display
+      setGeneratedSessionKey(sessionPrivateKey);
+      setGeneratedApproval(approval);
 
-      console.log("✅ Session key created successfully");
+      console.log("sessionKeyAccount", sessionKeyAccount.address)
+      console.log("approval: ", approval);
+      console.log("sessionPrivateKey: ", sessionPrivateKey);
+      console.log(`✅ frontEndGenerateApproval OK for ${chainConfig.name}`);
     } catch (e) {
-      console.error("❌ createSessionKey failed:", e);
+      console.error("❌ frontEndGenerateApproval failed:", e);
       const error = e as any;
 
       // Show user-friendly error message
-      let errorMessage = "createSessionKey failed. ";
+      let errorMessage = "frontEndGenerateApproval failed. ";
       if (error?.message) {
         errorMessage += `Error: ${error.message}`;
       } else {
@@ -237,14 +266,19 @@ export const Zerodev = () => {
     }
   };
 
-  const sendTransactionWithAmount = async () => {
-    if (!sessionKernelClient) {
-      alert("Please create a session key first");
+  const backEndSendTx = async () => {
+    if (!inputSessionKey || inputSessionKey === "0x") {
+      alert("请输入 Session Private Key");
+      return;
+    }
+
+    if (!inputApproval) {
+      alert("请输入 Approval 数据");
       return;
     }
 
     if (!amount || parseFloat(amount) <= 0) {
-      alert("Please enter a valid amount");
+      alert("请输入有效的转账金额");
       return;
     }
 
@@ -252,25 +286,64 @@ export const Zerodev = () => {
     setTxHash(null);
 
     try {
-      const hash = await sessionKernelClient.sendTransaction({
-        calls: [
+      const chainConfig = getTxChainConfig();
+
+      // Create public client for selected chain
+      const publicClient = createPublicClient({
+        chain: chainConfig.chain,
+        transport: http(),
+      });
+
+      const sessionKeySigner = await toECDSASigner({
+        signer: privateKeyToAccount(inputSessionKey as `0x${string}`),
+      });
+
+      const sessionKeyAccount = await deserializePermissionAccount(
+        publicClient,
+        entryPoint,
+        KERNEL_V3_3,
+        inputApproval,
+        sessionKeySigner
+      );
+      console.log("sessionKeyAccount", sessionKeyAccount.address)
+
+      const kernelPaymaster = createZeroDevPaymasterClient({
+        chain: chainConfig.chain,
+        transport: http(chainConfig.paymasterRpc),
+      });
+      const kernelClient = createKernelAccountClient({
+        account: sessionKeyAccount,
+        chain: chainConfig.chain,
+        bundlerTransport: http(chainConfig.bundlerRpc),
+        paymaster: kernelPaymaster,
+      });
+
+      const userOpHash = await kernelClient.sendUserOperation({
+        callData: await sessionKeyAccount.encodeCalls([
           {
-            to: TOKEN_ADDRESS,
+            to: chainConfig.tokenAddress as `0x${string}`,
             value: BigInt(0),
             data: encodeFunctionData({
               abi: erc20Abi,
               functionName: "transfer",
-              args: [RECEIVER, parseUnits(amount, TOKEN_DECIMALS)],
+              args: [chainConfig.receiver as `0x${string}`, parseUnits(amount, chainConfig.tokenDecimals)],
             }),
           },
-        ],
+        ]),
       });
 
-      setTxHash(hash);
-      console.log("✅ Transaction sent successfully:", hash);
-      alert(`Transaction sent successfully! Hash: ${hash}`);
+      console.log("userOp hash:", userOpHash);
+
+      const _receipt = await kernelClient.waitForUserOperationReceipt({
+        hash: userOpHash,
+      });
+      const txHash = _receipt.receipt.transactionHash;
+
+      setTxHash(txHash);
+      console.log(`✅ Transaction sent successfully on ${chainConfig.name}:`, txHash);
+      alert(`Transaction sent successfully on ${chainConfig.name}! Hash: ${txHash}`);
     } catch (e) {
-      console.error("❌ sendTransactionWithAmount failed:", e);
+      console.error("❌ backEndSendTx failed:", e);
       const error = e as any;
 
       // Show user-friendly error message
@@ -288,12 +361,8 @@ export const Zerodev = () => {
 
   return (
     <>
-      <p className="mt-6 font-bold uppercase text-sm text-gray-600">
-        Zerodev Delegation + Flow
-      </p>
-
       {/* Wallet Info Section */}
-      {embeddedWallet && (
+      {privyEmbeddedWallet && (
         <div className="mt-4 p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200 shadow-sm">
           <div className="flex items-center mb-4">
             <div className="w-3 h-3 bg-green-500 rounded-full mr-2"></div>
@@ -305,51 +374,187 @@ export const Zerodev = () => {
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-gray-600">钱包地址</span>
                 <button
-                  onClick={() => navigator.clipboard.writeText(embeddedWallet.address)}
+                  onClick={() => navigator.clipboard.writeText(privyEmbeddedWallet.address)}
                   className="text-xs text-blue-600 hover:text-blue-800 underline"
                 >
                   复制
                 </button>
               </div>
               <div className="font-mono text-sm text-gray-800 bg-gray-50 p-2 rounded border break-all">
-                {embeddedWallet.address}
+                {privyEmbeddedWallet.address}
               </div>
             </div>
 
+            {/* Multi-chain Token Balances */}
             <div className="bg-white p-4 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-gray-600">{tokenName} 余额</span>
-                <span className="text-lg font-bold text-blue-600">
-                  {balance} {tokenName}
-                </span>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-sm font-medium text-gray-600">代币余额</span>
+                <span className="text-xs text-gray-500">所有链</span>
+              </div>
+              <div className="space-y-2">
+                {CHAIN_CONFIGS.map((chainConfig) => {
+                  const chainBalance = balances[chainConfig.configId];
+                  return (
+                    <div key={chainConfig.configId} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
+                      <div className="flex items-center">
+                        <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
+                        <span className="text-sm text-gray-700">{chainConfig.name}</span>
+                      </div>
+                      <span className="text-sm font-medium text-gray-800">
+                        {chainBalance ? `${chainBalance.balance} ${chainBalance.tokenName}` : "加载中..."}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      <div className="mt-6 flex gap-4 flex-wrap">
-        <button
-          onClick={createSessionKey}
-          disabled={loading}
-          className="flex items-center px-6 py-3 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white font-medium rounded-lg shadow-sm transition-colors duration-200"
-        >
-          {loading && (
-            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-          )}
-          {loading ? "创建中..." : "创建 Session Key"}
-        </button>
+      {/* Frontend: Generate Approval Section */}
+      <div className="mt-6 p-6 bg-gradient-to-r from-purple-50 to-violet-50 rounded-xl border border-purple-200 shadow-sm">
+        <div className="flex items-center mb-4">
+          <div className="w-3 h-3 bg-purple-500 rounded-full mr-2"></div>
+          <h3 className="text-lg font-bold text-purple-700">前端操作：生成授权</h3>
+        </div>
+
+        <div className="space-y-4">
+          {/* Chain Selection for Frontend */}
+          <div className="bg-white p-4 rounded-lg border border-gray-200">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              选择链
+            </label>
+            <select
+              value={selectedChainId}
+              onChange={(e) => setSelectedChainId(Number(e.target.value))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none"
+              disabled={loading}
+            >
+              {CHAIN_CONFIGS.map((chainConfig) => (
+                <option key={chainConfig.configId} value={chainConfig.configId}>
+                  {chainConfig.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex gap-4 flex-wrap">
+            <button
+              onClick={frontEndGenerateApproval}
+              disabled={loading || !getCurrentChainConfig().bundlerRpc || !getCurrentChainConfig().paymasterRpc}
+              className="flex items-center px-6 py-3 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white font-medium rounded-lg shadow-sm transition-colors duration-200"
+            >
+              {loading && (
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+              )}
+              {loading ? "生成中..." : `在 ${getCurrentChainConfig().name} 上生成 Session Key 和 Approval`}
+            </button>
+          </div>
+        </div>
       </div>
 
-      {sessionKernelClient && (
+      {/* Display Generated Data */}
+      {generatedSessionKey && generatedApproval && (
         <div className="mt-6 p-6 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200 shadow-sm">
           <div className="flex items-center mb-4">
             <div className="w-3 h-3 bg-green-500 rounded-full mr-2"></div>
-            <p className="text-lg font-bold text-green-700">Session Key 创建成功！</p>
+            <h3 className="text-lg font-bold text-green-700">生成成功！请复制以下数据</h3>
+          </div>
+
+          <div className="space-y-4">
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-600">Session Private Key</span>
+                <button
+                  onClick={() => navigator.clipboard.writeText(generatedSessionKey)}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  复制
+                </button>
+              </div>
+              <div className="font-mono text-xs text-gray-800 bg-gray-50 p-3 rounded border break-all">
+                {generatedSessionKey}
+              </div>
+            </div>
+
+            <div className="bg-white p-4 rounded-lg border border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-600">Approval Data</span>
+                <button
+                  onClick={() => navigator.clipboard.writeText(generatedApproval)}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  复制
+                </button>
+              </div>
+              <div className="font-mono text-xs text-gray-800 bg-gray-50 p-3 rounded border break-all max-h-32 overflow-y-auto">
+                {generatedApproval}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Backend: Send Transaction Section */}
+      <div className="mt-6 p-6 bg-gradient-to-r from-blue-50 to-cyan-50 rounded-xl border border-blue-200 shadow-sm">
+        <div className="flex items-center mb-4">
+          <div className="w-3 h-3 bg-blue-500 rounded-full mr-2"></div>
+          <h3 className="text-lg font-bold text-blue-700">后端操作：发送交易</h3>
+        </div>
+
+        <div className="space-y-4">
+          {/* Chain Selection for Transaction */}
+          <div className="bg-white p-4 rounded-lg border border-gray-200">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              选择链
+            </label>
+            <select
+              value={selectedChainForTx}
+              onChange={(e) => setSelectedChainForTx(Number(e.target.value))}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+              disabled={sendingTx}
+            >
+              {CHAIN_CONFIGS.map((chainConfig) => (
+                <option key={chainConfig.configId} value={chainConfig.configId}>
+                  {chainConfig.name}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <h4 className="text-sm font-medium text-gray-700 mb-3">发送 Token 交易</h4>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Session Private Key
+            </label>
+            <textarea
+              placeholder="请粘贴 Session Private Key..."
+              value={inputSessionKey}
+              onChange={(e) => setInputSessionKey(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
+              rows={2}
+              disabled={sendingTx}
+            />
+          </div>
+
+          <div className="bg-white p-4 rounded-lg border border-gray-200">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Approval Data
+            </label>
+            <textarea
+              placeholder="请粘贴 Approval 数据..."
+              value={inputApproval}
+              onChange={(e) => setInputApproval(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
+              rows={4}
+              disabled={sendingTx}
+            />
+          </div>
+
+          <div className="bg-white p-4 rounded-lg border border-gray-200">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              转账金额
+            </label>
             <div className="flex gap-3 items-center">
               <input
                 type="text"
@@ -360,19 +565,21 @@ export const Zerodev = () => {
                 disabled={sendingTx}
               />
               <button
-                onClick={sendTransactionWithAmount}
-                disabled={sendingTx || !amount}
+                onClick={backEndSendTx}
+                disabled={sendingTx || !amount || !inputSessionKey || !inputApproval || !getTxChainConfig().bundlerRpc || !getTxChainConfig().paymasterRpc}
                 className="flex items-center px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium rounded-lg shadow-sm transition-colors duration-200"
               >
                 {sendingTx && (
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
                 )}
-                {sendingTx ? "发送中..." : "发送交易"}
+                {sendingTx ? "发送中..." : `在 ${getTxChainConfig().name} 上发送交易`}
               </button>
             </div>
           </div>
         </div>
-      )}
+      </div>
+
+
 
       {txHash && (
         <div className="mt-6 p-6 bg-gradient-to-r from-emerald-50 to-green-50 rounded-xl border border-emerald-200 shadow-sm">
@@ -399,7 +606,7 @@ export const Zerodev = () => {
               {txHash}
             </div>
             <a
-              href={`${chain.blockExplorers?.default?.url}/tx/${txHash}`}
+              href={`${getTxChainConfig().chain.blockExplorers?.default?.url}/tx/${txHash}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors duration-200"
