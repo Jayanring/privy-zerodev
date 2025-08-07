@@ -123,21 +123,6 @@ export const Zerodev = () => {
                 paymaster: paymasterClient,
                 client: publicClient,
               });
-
-              const userOpParams = {
-                calls: [{ to: zeroAddress, value: BigInt(0), data: "0x0123456789abcdef" as Hex }],
-              };
-
-              const userOpHash = await kernelClient.sendUserOperation(userOpParams);
-
-              const { receipt } =
-                await kernelClient.waitForUserOperationReceipt({
-                  hash: userOpHash,
-                });
-
-              setTxHash(receipt.transactionHash);
-              console.log("✅ Transaction completed successfully!");
-
             } catch (e) {
               console.error("❌ Transaction failed:", e);
               const error = e as any;
