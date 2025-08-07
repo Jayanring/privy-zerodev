@@ -177,8 +177,8 @@ export const Zerodev = () => {
                 value: zeroAddress,
               },
               {
-                condition: ParamCondition.LESS_THAN_OR_EQUAL,
-                value: parseUnits("10", TOKEN_DECIMALS),
+                condition: ParamCondition.GREATER_THAN,
+                value: 0n,
               },
             ],
           },
@@ -369,12 +369,6 @@ export const Zerodev = () => {
                 )}
                 {sendingTx ? "发送中..." : "发送交易"}
               </button>
-            </div>
-
-            <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <p className="text-xs text-yellow-700">
-                ⚠️ 注意：如果金额超过 10 个 token，交易将被拒绝
-              </p>
             </div>
           </div>
         </div>
