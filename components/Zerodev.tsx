@@ -10,6 +10,7 @@ import {
 import {
   getEntryPoint,
   KERNEL_V3_3,
+  KernelVersionToAddressesMap,
 } from "@zerodev/sdk/constants";
 import {
   createKernelAccount,
@@ -18,7 +19,7 @@ import {
 } from "@zerodev/sdk";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { sepolia, arbitrumSepolia } from "viem/chains";
-import { useWallets } from "@privy-io/react-auth";
+import { useSign7702Authorization, useWallets } from "@privy-io/react-auth";
 import { useState, useEffect } from "react";
 import { toECDSASigner } from "@zerodev/permissions/signers";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
@@ -66,6 +67,8 @@ const kernelVersion = KERNEL_V3_3;
 const entryPoint = getEntryPoint("0.7");
 
 export const Zerodev = () => {
+  const { signAuthorization } = useSign7702Authorization();
+
   const { wallets } = useWallets();
   const [loading, setLoading] = useState(false);
   const [sendingTx, setSendingTx] = useState(false);
@@ -229,10 +232,16 @@ export const Zerodev = () => {
         policies: [callPolicy],
       });
 
+      const authorization = await signAuthorization({
+        contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
+        chainId: chainConfig.chain.id,
+      });
+
       const sessionKeyAccount = await createKernelAccount(publicClient, {
         entryPoint,
         kernelVersion,
         eip7702Account: privyWallet,
+        eip7702Auth: authorization,
         plugins: {
           regular: permissionPlugin,
         },
