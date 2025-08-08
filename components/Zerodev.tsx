@@ -231,13 +231,12 @@ export const Zerodev = () => {
     try {
       const chainConfig = getCurrentChainConfig();
 
-      // Create public client for selected chain
+      // Step1: Prepare
       const publicClient = createPublicClient({
         chain: chainConfig.chain,
         transport: http(),
       });
 
-      // Step1: Upgrade privy EOA to smart account
       const privyWallet = createWalletClient({
         account: privyEmbeddedWallet.address as Hex,
         chain: chainConfig.chain,
@@ -250,7 +249,7 @@ export const Zerodev = () => {
         signer: privateKeyToAccount(sessionPrivateKey),
       });
 
-      // Step3: Prepare call policy
+      // Step3: Prepare permissionPlugin
       const callPolicy = toCallPolicy({
         policyVersion: CallPolicyVersion.V0_0_4,
         permissions: [
@@ -273,7 +272,6 @@ export const Zerodev = () => {
         ],
       });
 
-      // Step4: Approve session key
       const permissionPlugin = await toPermissionValidator(publicClient, {
         entryPoint,
         kernelVersion,
@@ -281,6 +279,7 @@ export const Zerodev = () => {
         policies: [callPolicy],
       });
 
+      // Step4: Approve session key
       const authorization = await signAuthorization({
         contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
         chainId: chainConfig.chain.id,
