@@ -78,6 +78,7 @@ export const Zerodev = () => {
   // Multi-chain states
   const [selectedChainId, setSelectedChainId] = useState<number>(CHAIN_CONFIGS[0].configId);
   const [balances, setBalances] = useState<Record<number, { balance: string; tokenName: string }>>({});
+  const [receiverBalances, setReceiverBalances] = useState<Record<number, { balance: string; tokenName: string }>>({});
   const [selectedChainForTx, setSelectedChainForTx] = useState<number>(CHAIN_CONFIGS[0].configId);
 
   // States for frontend/backend separation
@@ -91,7 +92,7 @@ export const Zerodev = () => {
     (wallet) => wallet.walletClientType === "privy"
   );
 
-  // Function to fetch token balance and name for all chains
+  // Function to fetch token balance and name for all chains (Privy Wallet)
   const fetchAllBalances = async () => {
     if (!privyEmbeddedWallet?.address) return;
 
@@ -139,13 +140,61 @@ export const Zerodev = () => {
     setBalances(newBalances);
   };
 
+  // Function to fetch receiver address balances for all chains
+  const fetchReceiverBalances = async () => {
+    const newReceiverBalances: Record<number, { balance: string; tokenName: string }> = {};
+
+    // Fetch receiver balances for all chains in parallel
+    await Promise.all(
+      CHAIN_CONFIGS.map(async (chainConfig) => {
+        try {
+          const publicClient = createPublicClient({
+            chain: chainConfig.chain,
+            transport: http(),
+          });
+
+          const [balance, name] = await Promise.all([
+            publicClient.readContract({
+              address: chainConfig.tokenAddress as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'balanceOf',
+              args: [chainConfig.receiver as `0x${string}`],
+            }),
+            publicClient.readContract({
+              address: chainConfig.tokenAddress as `0x${string}`,
+              abi: erc20Abi,
+              functionName: 'name',
+            })
+          ]);
+
+          // Convert balance from wei to readable format
+          const formattedBalance = (Number(balance) / Math.pow(10, chainConfig.tokenDecimals)).toFixed(6);
+          newReceiverBalances[chainConfig.configId] = {
+            balance: formattedBalance,
+            tokenName: name as string,
+          };
+        } catch (error) {
+          console.error(`Failed to fetch receiver balance for ${chainConfig.name}:`, error);
+          newReceiverBalances[chainConfig.configId] = {
+            balance: "Error",
+            tokenName: "Token",
+          };
+        }
+      })
+    );
+
+    setReceiverBalances(newReceiverBalances);
+  };
+
   // Effect to fetch balance every 5 seconds
   useEffect(() => {
     if (privyEmbeddedWallet?.address) {
       fetchAllBalances(); // Initial fetch
+      fetchReceiverBalances(); // Initial fetch for receiver balances
 
       const interval = setInterval(() => {
         fetchAllBalances();
+        fetchReceiverBalances();
       }, 5000); // Refresh every 5 seconds
 
       return () => clearInterval(interval);
@@ -369,265 +418,320 @@ export const Zerodev = () => {
   };
 
   return (
-    <>
-      {/* Wallet Info Section */}
-      {privyEmbeddedWallet && (
-        <div className="mt-4 p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200 shadow-sm">
-          <div className="flex items-center mb-4">
-            <div className="w-3 h-3 bg-green-500 rounded-full mr-2"></div>
-            <h3 className="text-lg font-bold text-gray-800">Privy Wallet</h3>
-          </div>
-
-          <div className="space-y-4">
-            <div className="bg-white p-4 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-gray-600">钱包地址</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(privyEmbeddedWallet.address)}
-                  className="text-xs text-blue-600 hover:text-blue-800 underline"
-                >
-                  复制
-                </button>
-              </div>
-              <div className="font-mono text-sm text-gray-800 bg-gray-50 p-2 rounded border break-all">
-                {privyEmbeddedWallet.address}
-              </div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      {/* Left Column */}
+      <div className="space-y-3">
+        {/* Wallet Info Section */}
+        {privyEmbeddedWallet && (
+          <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border border-blue-200">
+            <div className="flex items-center mb-3">
+              <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+              <h3 className="text-base font-bold text-gray-800">Privy Wallet</h3>
             </div>
 
-            {/* Multi-chain Token Balances */}
-            <div className="bg-white p-4 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-medium text-gray-600">代币余额</span>
-                <span className="text-xs text-gray-500">所有链</span>
+            <div className="space-y-3">
+              <div className="bg-white p-3 rounded border border-gray-200">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-gray-600">钱包地址</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(privyEmbeddedWallet.address)}
+                    className="text-xs text-blue-600 hover:text-blue-800 underline"
+                  >
+                    复制
+                  </button>
+                </div>
+                <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all">
+                  {privyEmbeddedWallet.address}
+                </div>
               </div>
-              <div className="space-y-2">
-                {CHAIN_CONFIGS.map((chainConfig) => {
-                  const chainBalance = balances[chainConfig.configId];
-                  return (
-                    <div key={chainConfig.configId} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-b-0">
-                      <div className="flex items-center">
-                        <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-                        <span className="text-sm text-gray-700">{chainConfig.name}</span>
+
+              {/* Multi-chain Token Balances */}
+              <div className="bg-white p-3 rounded border border-gray-200">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-gray-600">代币余额</span>
+                  <span className="text-xs text-gray-500">所有链</span>
+                </div>
+                <div className="space-y-1">
+                  {CHAIN_CONFIGS.map((chainConfig) => {
+                    const chainBalance = balances[chainConfig.configId];
+                    return (
+                      <div key={chainConfig.configId} className="flex items-center justify-between py-1 border-b border-gray-100 last:border-b-0">
+                        <div className="flex items-center">
+                          <div className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-2"></div>
+                          <span className="text-xs text-gray-700">{chainConfig.name}</span>
+                        </div>
+                        <span className="text-xs font-medium text-gray-800">
+                          {chainBalance ? `${chainBalance.balance} ${chainBalance.tokenName}` : "加载中..."}
+                        </span>
                       </div>
-                      <span className="text-sm font-medium text-gray-800">
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Chain Deposit Addresses and Balances Section */}
+        <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg border border-amber-200">
+          <div className="flex items-center mb-3">
+            <div className="w-2 h-2 bg-amber-500 rounded-full mr-2"></div>
+            <h3 className="text-base font-bold text-gray-800">链存入地址和余额</h3>
+          </div>
+
+          <div className="space-y-3">
+            {CHAIN_CONFIGS.map((chainConfig) => {
+              const chainBalance = receiverBalances[chainConfig.configId];
+              return (
+                <div key={chainConfig.configId} className="bg-white p-3 rounded border border-gray-200">
+                  <div className="flex items-center mb-2">
+                    <div className="w-1.5 h-1.5 bg-amber-500 rounded-full mr-2"></div>
+                    <span className="text-xs font-semibold text-gray-800">{chainConfig.name}</span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {/* Deposit Address */}
+                    <div className="border-b border-gray-100 pb-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs text-gray-600">存入地址</span>
+                        <button
+                          onClick={() => navigator.clipboard.writeText(chainConfig.receiver)}
+                          className="text-xs text-blue-600 hover:text-blue-800 underline"
+                        >
+                          复制
+                        </button>
+                      </div>
+                      <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all">
+                        {chainConfig.receiver}
+                      </div>
+                    </div>
+
+                    {/* Token Balance */}
+                    <div className="flex items-center justify-between py-1">
+                      <span className="text-xs text-gray-600">代币余额</span>
+                      <span className="text-xs font-medium text-gray-800">
                         {chainBalance ? `${chainBalance.balance} ${chainBalance.tokenName}` : "加载中..."}
                       </span>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Frontend: Generate Approval Section */}
-      <div className="mt-6 p-6 bg-gradient-to-r from-purple-50 to-violet-50 rounded-xl border border-purple-200 shadow-sm">
-        <div className="flex items-center mb-4">
-          <div className="w-3 h-3 bg-purple-500 rounded-full mr-2"></div>
-          <h3 className="text-lg font-bold text-purple-700">前端操作：生成授权</h3>
-        </div>
-
-        <div className="space-y-4">
-          {/* Chain Selection for Frontend */}
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              选择链
-            </label>
-            <select
-              value={selectedChainId}
-              onChange={(e) => setSelectedChainId(Number(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none"
-              disabled={loading}
-            >
-              {CHAIN_CONFIGS.map((chainConfig) => (
-                <option key={chainConfig.configId} value={chainConfig.configId}>
-                  {chainConfig.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="flex gap-4 flex-wrap">
-            <button
-              onClick={frontEndGenerateApproval}
-              disabled={loading || !getCurrentChainConfig().bundlerRpc || !getCurrentChainConfig().paymasterRpc}
-              className="flex items-center px-6 py-3 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white font-medium rounded-lg shadow-sm transition-colors duration-200"
-            >
-              {loading && (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-              )}
-              {loading ? "生成中..." : `在 ${getCurrentChainConfig().name} 上生成 Session Key 和 Approval`}
-            </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* Display Generated Data */}
-      {generatedSessionKey && generatedApproval && (
-        <div className="mt-6 p-6 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200 shadow-sm">
-          <div className="flex items-center mb-4">
-            <div className="w-3 h-3 bg-green-500 rounded-full mr-2"></div>
-            <h3 className="text-lg font-bold text-green-700">生成成功！请复制以下数据</h3>
+      {/* Right Column */}
+      <div className="space-y-3">
+
+        {/* Frontend: Generate Approval Section */}
+        <div className="p-4 bg-gradient-to-r from-purple-50 to-violet-50 rounded-lg border border-purple-200">
+          <div className="flex items-center mb-3">
+            <div className="w-2 h-2 bg-purple-500 rounded-full mr-2"></div>
+            <h3 className="text-base font-bold text-purple-700">前端操作：生成授权</h3>
           </div>
 
-          <div className="space-y-4">
-            <div className="bg-white p-4 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-gray-600">Session Private Key</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(generatedSessionKey)}
-                  className="text-xs text-blue-600 hover:text-blue-800 underline"
-                >
-                  复制
-                </button>
-              </div>
-              <div className="font-mono text-xs text-gray-800 bg-gray-50 p-3 rounded border break-all">
-                {generatedSessionKey}
-              </div>
+          <div className="space-y-3">
+            {/* Chain Selection for Frontend */}
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                选择链
+              </label>
+              <select
+                value={selectedChainId}
+                onChange={(e) => setSelectedChainId(Number(e.target.value))}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-none"
+                disabled={loading}
+              >
+                {CHAIN_CONFIGS.map((chainConfig) => (
+                  <option key={chainConfig.configId} value={chainConfig.configId}>
+                    {chainConfig.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
-            <div className="bg-white p-4 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-gray-600">Approval Data</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(generatedApproval)}
-                  className="text-xs text-blue-600 hover:text-blue-800 underline"
-                >
-                  复制
-                </button>
-              </div>
-              <div className="font-mono text-xs text-gray-800 bg-gray-50 p-3 rounded border break-all max-h-32 overflow-y-auto">
-                {generatedApproval}
-              </div>
+            <div className="flex gap-2">
+              <button
+                onClick={frontEndGenerateApproval}
+                disabled={loading || !getCurrentChainConfig().bundlerRpc || !getCurrentChainConfig().paymasterRpc}
+                className="flex items-center px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white text-xs font-medium rounded shadow-sm transition-colors duration-200"
+              >
+                {loading && (
+                  <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin mr-1"></div>
+                )}
+                {loading ? "生成中..." : `在 ${getCurrentChainConfig().name} 上生成授权`}
+              </button>
             </div>
           </div>
         </div>
-      )}
 
-      {/* Backend: Send Transaction Section */}
-      <div className="mt-6 p-6 bg-gradient-to-r from-blue-50 to-cyan-50 rounded-xl border border-blue-200 shadow-sm">
-        <div className="flex items-center mb-4">
-          <div className="w-3 h-3 bg-blue-500 rounded-full mr-2"></div>
-          <h3 className="text-lg font-bold text-blue-700">后端操作：发送交易</h3>
-        </div>
+        {/* Display Generated Data */}
+        {generatedSessionKey && generatedApproval && (
+          <div className="p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border border-green-200">
+            <div className="flex items-center mb-3">
+              <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
+              <h3 className="text-base font-bold text-green-700">生成成功！请复制以下数据</h3>
+            </div>
 
-        <div className="space-y-4">
-          {/* Chain Selection for Transaction */}
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              选择链
-            </label>
-            <select
-              value={selectedChainForTx}
-              onChange={(e) => setSelectedChainForTx(Number(e.target.value))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-              disabled={sendingTx}
-            >
-              {CHAIN_CONFIGS.map((chainConfig) => (
-                <option key={chainConfig.configId} value={chainConfig.configId}>
-                  {chainConfig.name}
-                </option>
-              ))}
-            </select>
+            <div className="space-y-3">
+              <div className="bg-white p-3 rounded border border-gray-200">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-gray-600">Session Private Key</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(generatedSessionKey)}
+                    className="text-xs text-blue-600 hover:text-blue-800 underline"
+                  >
+                    复制
+                  </button>
+                </div>
+                <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all">
+                  {generatedSessionKey}
+                </div>
+              </div>
+
+              <div className="bg-white p-3 rounded border border-gray-200">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-gray-600">Approval Data</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(generatedApproval)}
+                    className="text-xs text-blue-600 hover:text-blue-800 underline"
+                  >
+                    复制
+                  </button>
+                </div>
+                <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all max-h-24 overflow-y-auto">
+                  {generatedApproval}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Backend: Send Transaction Section */}
+        <div className="p-4 bg-gradient-to-r from-blue-50 to-cyan-50 rounded-lg border border-blue-200">
+          <div className="flex items-center mb-3">
+            <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
+            <h3 className="text-base font-bold text-blue-700">后端操作：发送交易</h3>
           </div>
 
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Session Private Key
-            </label>
-            <textarea
-              placeholder="请粘贴 Session Private Key..."
-              value={inputSessionKey}
-              onChange={(e) => setInputSessionKey(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
-              rows={2}
-              disabled={sendingTx}
-            />
-          </div>
+          <div className="space-y-3">
+            {/* Chain Selection for Transaction */}
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                选择链
+              </label>
+              <select
+                value={selectedChainForTx}
+                onChange={(e) => setSelectedChainForTx(Number(e.target.value))}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                disabled={sendingTx}
+              >
+                {CHAIN_CONFIGS.map((chainConfig) => (
+                  <option key={chainConfig.configId} value={chainConfig.configId}>
+                    {chainConfig.name}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Approval Data
-            </label>
-            <textarea
-              placeholder="请粘贴 Approval 数据..."
-              value={inputApproval}
-              onChange={(e) => setInputApproval(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
-              rows={4}
-              disabled={sendingTx}
-            />
-          </div>
-
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              转账金额
-            </label>
-            <div className="flex gap-3 items-center">
-              <input
-                type="text"
-                placeholder="输入转账金额"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                Session Private Key
+              </label>
+              <textarea
+                placeholder="请粘贴 Session Private Key..."
+                value={inputSessionKey}
+                onChange={(e) => setInputSessionKey(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
+                rows={2}
                 disabled={sendingTx}
               />
-              <button
-                onClick={backEndSendTx}
-                disabled={sendingTx || !amount || !inputSessionKey || !inputApproval || !getTxChainConfig().bundlerRpc || !getTxChainConfig().paymasterRpc}
-                className="flex items-center px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium rounded-lg shadow-sm transition-colors duration-200"
-              >
-                {sendingTx && (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                )}
-                {sendingTx ? "发送中..." : `在 ${getTxChainConfig().name} 上发送交易`}
-              </button>
+            </div>
+
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                Approval Data
+              </label>
+              <textarea
+                placeholder="请粘贴 Approval 数据..."
+                value={inputApproval}
+                onChange={(e) => setInputApproval(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
+                rows={3}
+                disabled={sendingTx}
+              />
+            </div>
+
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                转账金额
+              </label>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  placeholder="输入转账金额"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  className="flex-1 px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                  disabled={sendingTx}
+                />
+                <button
+                  onClick={backEndSendTx}
+                  disabled={sendingTx || !amount || !inputSessionKey || !inputApproval || !getTxChainConfig().bundlerRpc || !getTxChainConfig().paymasterRpc}
+                  className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white text-xs font-medium rounded shadow-sm transition-colors duration-200"
+                >
+                  {sendingTx && (
+                    <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin mr-1"></div>
+                  )}
+                  {sendingTx ? "发送中..." : `发送交易`}
+                </button>
+              </div>
             </div>
           </div>
         </div>
+
+
+
+        {txHash && (
+          <div className="p-4 bg-gradient-to-r from-emerald-50 to-green-50 rounded-lg border border-emerald-200">
+            <div className="flex items-center mb-3">
+              <div className="w-4 h-4 bg-green-500 rounded-full flex items-center justify-center mr-2">
+                <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <h3 className="text-base font-bold text-green-700">交易发送成功！</h3>
+            </div>
+
+            <div className="bg-white p-3 rounded border border-gray-200">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-medium text-gray-600">交易哈希</span>
+                <button
+                  onClick={() => navigator.clipboard.writeText(txHash)}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline"
+                >
+                  复制
+                </button>
+              </div>
+              <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all mb-2">
+                {txHash}
+              </div>
+              <a
+                href={`${getTxChainConfig().chain.blockExplorers?.default?.url}/tx/${txHash}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded shadow-sm transition-colors duration-200"
+              >
+                <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+                在区块链浏览器中查看
+              </a>
+            </div>
+          </div>
+        )}
       </div>
-
-
-
-      {txHash && (
-        <div className="mt-6 p-6 bg-gradient-to-r from-emerald-50 to-green-50 rounded-xl border border-emerald-200 shadow-sm">
-          <div className="flex items-center mb-4">
-            <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center mr-3">
-              <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            </div>
-            <h3 className="text-lg font-bold text-green-700">交易发送成功！</h3>
-          </div>
-
-          <div className="bg-white p-4 rounded-lg border border-gray-200">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-gray-600">交易哈希</span>
-              <button
-                onClick={() => navigator.clipboard.writeText(txHash)}
-                className="text-xs text-blue-600 hover:text-blue-800 underline"
-              >
-                复制
-              </button>
-            </div>
-            <div className="font-mono text-sm text-gray-800 bg-gray-50 p-2 rounded border break-all mb-3">
-              {txHash}
-            </div>
-            <a
-              href={`${getTxChainConfig().chain.blockExplorers?.default?.url}/tx/${txHash}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition-colors duration-200"
-            >
-              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-              在区块链浏览器中查看
-            </a>
-          </div>
-        </div>
-      )}
-    </>
+    </div>
   );
 };
