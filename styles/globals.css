@@ -1,8 +1,16 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-privy-navy: #160B45;
+  --color-privy-light-blue: #EFF1FD;
+  --color-privy-blueish: #D4D9FC;
+  --color-privy-pink: #FF8271;
+
+  --font-family-sans: "Adelle Sans", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
 
 @layer base {
+
   /* normal */
   @font-face {
     font-family: "Adelle Sans";
