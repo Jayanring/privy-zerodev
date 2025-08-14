@@ -1,0 +1,1 @@
+{"version":3,"file":"toEmptyECDSASigner.d.ts","sourceRoot":"","sources":["../../signers/toEmptyECDSASigner.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,OAAO,EAAuB,MAAM,MAAM,CAAA;AAGxD,OAAO,KAAK,EAAE,aAAa,EAAE,MAAM,aAAa,CAAA;AAEhD,wBAAgB,kBAAkB,CAC9B,OAAO,EAAE,OAAO,EAChB,qBAAqB,GAAE,OAA+B,GACvD,aAAa,CA0Bf"}

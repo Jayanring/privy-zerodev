@@ -287,6 +287,7 @@ export const Zerodev = () => {
             contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
             chainId: chainConfig.chain.id,
           });
+          console.log("authorization:", authorization);
 
           const sessionKeyAccount = await createKernelAccount(publicClient, {
             entryPoint,
@@ -318,10 +319,6 @@ export const Zerodev = () => {
       console.log("Generated approvals for chains:", Object.keys(approvals).map(id =>
         CHAIN_CONFIGS.find(c => c.configId === Number(id))?.name
       ).join(', '));
-
-      // Show summary to user
-      const successCount = Object.keys(approvals).length;
-      const totalCount = CHAIN_CONFIGS.filter(c => c.bundlerRpc && c.paymasterRpc).length;
 
     } catch (e) {
       console.error("❌ frontEndGenerateApproval failed:", e);

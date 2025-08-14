@@ -1,0 +1,1 @@
+{"version":3,"file":"toSudoPolicy.d.ts","sourceRoot":"","sources":["../../policies/toSudoPolicy.ts"],"names":[],"mappings":"AAEA,OAAO,KAAK,EAAE,MAAM,EAAE,YAAY,EAAE,MAAM,aAAa,CAAA;AAEvD,MAAM,MAAM,gBAAgB,GAAG,YAAY,CAAA;AAE3C,wBAAgB,YAAY,CAAC,EACzB,aAAoC,EACpC,UAA2C,EAC9C,EAAE,gBAAgB,GAAG,MAAM,CAc3B"}

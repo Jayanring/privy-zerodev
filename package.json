@@ -52,8 +52,8 @@
     "@zerodev/intent": "^0.0.27",
     "@zerodev/multi-chain-ecdsa-validator": "^5.4.5",
     "@zerodev/passkey-validator": "^5.5.5",
-    "@zerodev/permissions": "^5.5.8",
-    "@zerodev/sdk": "file:./zerodev-sdk",
+    "@zerodev/permissions": "file:./zerodev/zerodev-permissions",
+    "@zerodev/sdk": "file:./zerodev/zerodev-sdk",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -98,6 +98,7 @@
     "typescript": "^5"
   },
   "overrides": {
-    "@zerodev/sdk": "file:./zerodev-sdk"
+    "@zerodev/sdk": "file:./zerodev/zerodev-sdk",
+    "@zerodev/permissions": "file:./zerodev/zerodev-permissions"
   }
 }
