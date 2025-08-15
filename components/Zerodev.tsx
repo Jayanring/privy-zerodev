@@ -2,17 +2,17 @@ import { useState, useEffect } from "react";
 import {
   Chain,
   createPublicClient,
-  createWalletClient,
-  custom,
   encodeFunctionData,
   erc20Abi,
   Hex,
   http,
+  parseSignature,
   parseUnits,
   zeroAddress,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { arbitrumSepolia, sepolia } from "viem/chains";
+import { hashAuthorization } from "viem/utils";
 import {
   createKernelAccount,
   createKernelAccountClient,
@@ -30,7 +30,7 @@ import {
 } from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
 import { toECDSASigner } from "@zerodev/permissions/signers";
-import { useSign7702Authorization, useWallets } from "@privy-io/react-auth";
+import { useWallets } from "@privy-io/react-auth";
 
 // Chain configuration type
 interface ChainConfig {
@@ -50,19 +50,17 @@ const actionSelector = getActionSelector(entryPoint.version);
 // Mock backend storage
 interface BackendStorage {
   sessionKeys: Record<string, string>; // walletAddress -> sessionPrivateKey
-  authorizations: Record<string, Record<number, any>>; // walletAddress -> chainId -> authorization
+  authSignatures: Record<string, Record<number, any>>; // walletAddress -> chainId -> signature
   pluginSignatures: Record<string, Record<number, string>>; // walletAddress -> chainId -> signature
 }
 
 const mockBackendStorage: BackendStorage = {
   sessionKeys: {},
-  authorizations: {},
+  authSignatures: {},
   pluginSignatures: {},
 };
 
 export const Zerodev = () => {
-  const { signAuthorization } = useSign7702Authorization();
-
   const { wallets } = useWallets();
   const [loading, setLoading] = useState(false);
   const [sendingTx, setSendingTx] = useState(false);
@@ -225,7 +223,8 @@ export const Zerodev = () => {
   }
 
   // Backend function: Generate session key and signing data
-  const getDataToSign = async (walletAddress: string) => {
+  // Returns Map<chainId => { authToSign, pluginsToSign }>
+  const getDataToSign = async (walletAddress: string): Promise<Map<number, { authToSign: any, pluginsToSign: any }>> => {
     // Generate session key for this wallet
     const sessionPrivateKey = generatePrivateKey();
     const sessionKeySigner = await toECDSASigner({
@@ -234,8 +233,7 @@ export const Zerodev = () => {
 
     mockBackendStorage.sessionKeys[walletAddress] = sessionPrivateKey;
 
-    const authToSignData: Record<number, any> = {};
-    const pluginsToSignData: Record<number, any> = {};
+    const signingDataMap = new Map<number, { authToSign: any, pluginsToSign: any }>();
 
     for (const [chainId, chainConfig] of CHAIN_CONFIGS.entries()) {
       if (!chainConfig.bundlerRpc || !chainConfig.paymasterRpc) {
@@ -278,14 +276,10 @@ export const Zerodev = () => {
           policies: [callPolicy],
         });
 
-        // Generate auth to sign data
-        const authToSign = {
-          contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
-          chainId: chainConfig.chain.id,
-        };
-        authToSignData[chainConfig.chain.id] = authToSign;
+        const authToSign = hashAuthorization({
+          address: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress, chainId, nonce: 0
+        });
 
-        // Generate plugins to sign data
         const pluginsToSign = await getPluginsEnableTypedDataV2({
           accountAddress: walletAddress as `0x${string}`,
           chainId: chainConfig.chain.id,
@@ -295,19 +289,24 @@ export const Zerodev = () => {
           validator: permissionPlugin,
           validatorNonce: 1,
         });
-        pluginsToSignData[chainConfig.chain.id] = pluginsToSign;
+
+        // Store both authToSign and pluginsToSign for this chain
+        signingDataMap.set(chainId, {
+          authToSign,
+          pluginsToSign: JSON.stringify(pluginsToSign)
+        });
 
       } catch (error) {
         console.error(`Failed to prepare signing data for ${chainConfig.name}:`, error);
       }
     }
 
-    return { authToSignData, pluginsToSignData };
+    return signingDataMap;
   };
 
-  // Backend function: Save authorizations and plugin signatures
-  const submitSignatures = async (walletAddress: string, authorizations: Record<number, any>, pluginSignatures: Record<number, string>) => {
-    mockBackendStorage.authorizations[walletAddress] = authorizations;
+  // Backend function: Save authSignatures and plugin signatures
+  const submitSignatures = async (walletAddress: string, authSignatures: Record<number, any>, pluginSignatures: Record<number, string>) => {
+    mockBackendStorage.authSignatures[walletAddress] = authSignatures;
     mockBackendStorage.pluginSignatures[walletAddress] = pluginSignatures;
 
     // Update backend saved addresses
@@ -320,7 +319,7 @@ export const Zerodev = () => {
   const getSavedAddresses = async () => {
     const savedAddresses: Record<number, string[]> = {};
 
-    for (const [walletAddress, chainAuths] of Object.entries(mockBackendStorage.authorizations)) {
+    for (const [walletAddress, chainAuths] of Object.entries(mockBackendStorage.authSignatures)) {
       for (const chainId of Object.keys(chainAuths)) {
         const chainIdNum = Number(chainId);
         if (!savedAddresses[chainIdNum]) {
@@ -344,13 +343,13 @@ export const Zerodev = () => {
       throw new Error("Chain not found");
     }
 
-    // Check if we have authorization and plugin signature for this address and chain
-    const authorization = mockBackendStorage.authorizations[address]?.[chainId];
+    // Check if we have authSignature and plugin signature for this address and chain
+    const authSignature = mockBackendStorage.authSignatures[address]?.[chainId];
     const pluginSignature = mockBackendStorage.pluginSignatures[address]?.[chainId];
     const sessionPrivateKey = mockBackendStorage.sessionKeys[address];
 
-    if (!authorization || !pluginSignature || !sessionPrivateKey) {
-      throw new Error("Missing authorization or plugin signature for this address and chain");
+    if (!authSignature || !pluginSignature || !sessionPrivateKey) {
+      throw new Error("Missing authSignature or pluginSignature for this address and chain");
     }
 
     // Build session key account and send transaction
@@ -408,6 +407,14 @@ export const Zerodev = () => {
         validUntil: 0
       }
     });
+
+    // Build Authorization
+    const authorization = {
+      address: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
+      chainId,
+      nonce: 0,
+      ...parseSignature(authSignature as Hex),
+    } as any;
 
     const sessionKeyAccount = await createKernelAccount(publicClient, {
       entryPoint,
@@ -476,51 +483,37 @@ export const Zerodev = () => {
 
     try {
       // Step 1: Call backend to get signing data
-      const { authToSignData, pluginsToSignData } = await getDataToSign(privyEmbeddedWallet.address);
+      const signingDataMap = await getDataToSign(privyEmbeddedWallet.address);
 
       // Step 2: Sign the data for all chains (frontend only signs what it receives)
-      const authorizations: Record<number, any> = {};
+      const authSignatures: Record<number, any> = {};
       const pluginSignatures: Record<number, string> = {};
 
-      // Sign authorization data for each chain
-      for (const [chainIdStr, authData] of Object.entries(authToSignData)) {
+      // Sign data for each chain using the Map structure
+      const provider = await privyEmbeddedWallet.getEthereumProvider();
+      for (const [chainId, { authToSign, pluginsToSign }] of signingDataMap.entries()) {
         try {
-          const chainId = Number(chainIdStr);
-          // Privy SDK should provides signAuthorization method
-          const authorization = await signAuthorization(authData);
-          authorizations[chainId] = authorization;
-        } catch (error) {
-          console.error(`❌ Failed to sign authorization for chain ${chainIdStr}:`, error);
-        }
-      }
-
-      // Sign plugin data for each chain
-      for (const [chainIdStr, pluginData] of Object.entries(pluginsToSignData)) {
-        try {
-          const chainId = Number(chainIdStr);
-          const chainConfig = CHAIN_CONFIGS.get(chainId);
-          if (!chainConfig) {
-            console.error(`❌ Chain config not found for chainId: ${chainId}`);
-            continue;
-          }
-
-          const privyWallet = createWalletClient({
-            account: privyEmbeddedWallet.address as Hex,
-            chain: chainConfig.chain,
-            transport: custom(await privyEmbeddedWallet.getEthereumProvider()),
+          // Sign authToSign for this chain
+          const authSignature = await provider.request({
+            method: "secp256k1_sign", params: [authToSign]
           });
+          authSignatures[chainId] = authSignature;
 
-          const pluginEnableSignature = await privyWallet.signTypedData(pluginData);
+          // Sign pluginsToSign for this chain
+          const pluginEnableSignature = await provider.request({
+            method: "eth_signTypedData_v4", params: [privyEmbeddedWallet.address, pluginsToSign]
+          });
           pluginSignatures[chainId] = pluginEnableSignature;
+
         } catch (error) {
-          console.error(`❌ Failed to sign plugin data for chain ${chainIdStr}:`, error);
+          console.error(`❌ Failed to sign data for chain ${chainId}:`, error);
         }
       }
 
       // Step 3: Call backend to submit signatures
-      await submitSignatures(privyEmbeddedWallet.address, authorizations, pluginSignatures);
+      await submitSignatures(privyEmbeddedWallet.address, authSignatures, pluginSignatures);
 
-      console.log("✅ Authorization and plugin signatures generated successfully");
+      console.log("✅ authSignatures and pluginSignatures generated successfully");
     } catch (e) {
       console.error("❌ frontEndJustSign failed:", e);
       const error = e as any;
