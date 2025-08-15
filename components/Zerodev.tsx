@@ -1,31 +1,36 @@
+import { useState, useEffect } from "react";
 import {
+  Chain,
   createPublicClient,
   createWalletClient,
   custom,
+  encodeFunctionData,
+  erc20Abi,
   Hex,
   http,
+  parseUnits,
   zeroAddress,
-  encodeFunctionData,
 } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { arbitrumSepolia } from "viem/chains";
+import {
+  createKernelAccount,
+  createKernelAccountClient,
+  createZeroDevPaymasterClient,
+} from "@zerodev/sdk";
+import { getActionSelector, getPluginsEnableTypedData as getPluginsEnableTypedDataV2, toKernelPluginManager } from "@zerodev/sdk/accounts";
 import {
   getEntryPoint,
   KERNEL_V3_3,
   KernelVersionToAddressesMap,
 } from "@zerodev/sdk/constants";
 import {
-  createKernelAccount,
-  createKernelAccountClient,
-  createZeroDevPaymasterClient,
-} from "@zerodev/sdk";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { sepolia, arbitrumSepolia } from "viem/chains";
-import { useSign7702Authorization, useWallets } from "@privy-io/react-auth";
-import { useState, useEffect } from "react";
-import { toECDSASigner } from "@zerodev/permissions/signers";
+  decodeParamsFromInitCode,
+  toPermissionValidator,
+} from "@zerodev/permissions";
 import { CallPolicyVersion, ParamCondition, toCallPolicy } from "@zerodev/permissions/policies";
-import { erc20Abi, parseUnits } from "viem";
-import { deserializePermissionAccount, serializePermissionAccount, toPermissionValidator } from "@zerodev/permissions";
-import { Chain } from "viem";
+import { toECDSASigner } from "@zerodev/permissions/signers";
+import { useSign7702Authorization, useWallets } from "@privy-io/react-auth";
 
 // Chain configuration type
 interface ChainConfig {
@@ -41,16 +46,16 @@ interface ChainConfig {
 
 // Multi-chain configuration
 const CHAIN_CONFIGS: ChainConfig[] = [
-  {
-    configId: 1,
-    name: "Sepolia",
-    chain: sepolia,
-    bundlerRpc: process.env.NEXT_PUBLIC_SEPOLIA_BUNDLER_RPC || "",
-    paymasterRpc: process.env.NEXT_PUBLIC_SEPOLIA_PAYMASTER_RPC || "",
-    tokenAddress: "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF",
-    tokenDecimals: 6,
-    receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
-  },
+  // {
+  //   configId: 1,
+  //   name: "Sepolia",
+  //   chain: sepolia,
+  //   bundlerRpc: process.env.NEXT_PUBLIC_SEPOLIA_BUNDLER_RPC || "",
+  //   paymasterRpc: process.env.NEXT_PUBLIC_SEPOLIA_PAYMASTER_RPC || "",
+  //   tokenAddress: "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF",
+  //   tokenDecimals: 6,
+  //   receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
+  // },
   {
     configId: 2,
     name: "Arbitrum Sepolia",
@@ -65,6 +70,7 @@ const CHAIN_CONFIGS: ChainConfig[] = [
 
 const kernelVersion = KERNEL_V3_3;
 const entryPoint = getEntryPoint("0.7");
+const actionSelector = getActionSelector(entryPoint.version);
 
 export const Zerodev = () => {
   const { signAuthorization } = useSign7702Authorization();
@@ -283,28 +289,96 @@ export const Zerodev = () => {
           });
 
           // Generate authorization for this chain
-          const authorization = await signAuthorization({
+          const authToSign = {
             contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
             chainId: chainConfig.chain.id,
-          });
-          console.log("authorization:", authorization);
+          };
+          const authorization = await signAuthorization(authToSign);
 
-          const sessionKeyAccount = await createKernelAccount(publicClient, {
+          // Manual sign
+          const pluginsToSign = await getPluginsEnableTypedDataV2({
+            accountAddress: privyWallet.account.address,
+            chainId: chainConfig.chain.id,
+            kernelVersion: kernelVersion,
+            action: { selector: actionSelector, address: zeroAddress },
+            hook: undefined,
+            validator: permissionPlugin,
+            validatorNonce: 1,
+          });
+          const pluginEnableSignature = await privyWallet.signTypedData(pluginsToSign);
+
+          // Build sessionKeyAccount with authorization and pluginEnableSignature
+          const modularPermissionPlugin = await toPermissionValidator(publicClient, {
+            signer: sessionKeySigner,
+            policies: [callPolicy],
+            entryPoint,
+            kernelVersion
+          })
+
+          const { index, validatorInitData, useMetaFactory } =
+            decodeParamsFromInitCode("0x", kernelVersion)
+
+          const kernelPluginManager = await toKernelPluginManager(publicClient, {
+            regular: modularPermissionPlugin,
+            pluginEnableSignature: pluginEnableSignature,
+            validatorInitData,
+            action: { selector: actionSelector, address: zeroAddress },
             entryPoint,
             kernelVersion,
-            eip7702Account: privyWallet,
-            eip7702Auth: authorization,
-            plugins: {
-              regular: permissionPlugin,
-            },
+            isPreInstalled: false,
+            ...{
+              validAfter: 0,
+              validUntil: 0
+            }
+          })
+
+          const sessionKeyAccountBackend = await createKernelAccount(publicClient, {
+            entryPoint,
+            kernelVersion,
+            plugins: kernelPluginManager,
+            index,
+            address: privyWallet.account.address,
+            useMetaFactory,
+            eip7702Auth: authorization
+          })
+
+          const kernelPaymaster = createZeroDevPaymasterClient({
+            chain: chainConfig.chain,
+            transport: http(chainConfig.paymasterRpc),
+          });
+          const kernelClient = createKernelAccountClient({
+            account: sessionKeyAccountBackend,
+            chain: chainConfig.chain,
+            bundlerTransport: http(chainConfig.bundlerRpc),
+            paymaster: kernelPaymaster,
           });
 
-          const approval = await serializePermissionAccount(sessionKeyAccount);
-          approvals[chainConfig.configId] = approval;
-          results.push(`✅ ${chainConfig.name}: 成功生成`);
+          const call = [
+            {
+              to: chainConfig.tokenAddress as `0x${string}`,
+              value: BigInt(0),
+              data: encodeFunctionData({
+                abi: erc20Abi,
+                functionName: "transfer",
+                args: [chainConfig.receiver as `0x${string}`, parseUnits(amount, chainConfig.tokenDecimals)],
+              }),
+            },
+          ];
 
-          console.log(`sessionKeyAccount for ${chainConfig.name}:`, sessionKeyAccount.address);
-          console.log(`approval for ${chainConfig.name}:`, approval);
+          const userOpHash = await kernelClient.sendUserOperation({
+            callData: await sessionKeyAccountBackend.encodeCalls(call),
+          });
+
+          console.log("userOp hash:", userOpHash);
+
+          const _receipt = await kernelClient.waitForUserOperationReceipt({
+            hash: userOpHash,
+          });
+          const txHash = _receipt.receipt.transactionHash;
+
+          setTxHash(txHash);
+          console.log(`✅ Transaction sent successfully on ${chainConfig.name}:`, txHash);
+
         } catch (chainError) {
           console.error(`❌ Failed to generate approval for ${chainConfig.name}:`, chainError);
           results.push(`❌ ${chainConfig.name}: 生成失败`);
@@ -358,61 +432,6 @@ export const Zerodev = () => {
     setTxHash(null);
 
     try {
-      const chainConfig = getTxChainConfig();
-
-      // Create public client for selected chain
-      const publicClient = createPublicClient({
-        chain: chainConfig.chain,
-        transport: http(),
-      });
-
-      const sessionKeySigner = await toECDSASigner({
-        signer: privateKeyToAccount(inputSessionKey as `0x${string}`),
-      });
-
-      const sessionKeyAccount = await deserializePermissionAccount(
-        publicClient,
-        entryPoint,
-        KERNEL_V3_3,
-        inputApproval,
-        sessionKeySigner
-      );
-      console.log("sessionKeyAccount", sessionKeyAccount.address)
-
-      const kernelPaymaster = createZeroDevPaymasterClient({
-        chain: chainConfig.chain,
-        transport: http(chainConfig.paymasterRpc),
-      });
-      const kernelClient = createKernelAccountClient({
-        account: sessionKeyAccount,
-        chain: chainConfig.chain,
-        bundlerTransport: http(chainConfig.bundlerRpc),
-        paymaster: kernelPaymaster,
-      });
-
-      const userOpHash = await kernelClient.sendUserOperation({
-        callData: await sessionKeyAccount.encodeCalls([
-          {
-            to: chainConfig.tokenAddress as `0x${string}`,
-            value: BigInt(0),
-            data: encodeFunctionData({
-              abi: erc20Abi,
-              functionName: "transfer",
-              args: [chainConfig.receiver as `0x${string}`, parseUnits(amount, chainConfig.tokenDecimals)],
-            }),
-          },
-        ]),
-      });
-
-      console.log("userOp hash:", userOpHash);
-
-      const _receipt = await kernelClient.waitForUserOperationReceipt({
-        hash: userOpHash,
-      });
-      const txHash = _receipt.receipt.transactionHash;
-
-      setTxHash(txHash);
-      console.log(`✅ Transaction sent successfully on ${chainConfig.name}:`, txHash);
     } catch (e) {
       console.error("❌ backEndSendTx failed:", e);
       const error = e as any;
