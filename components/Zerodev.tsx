@@ -12,7 +12,7 @@ import {
   zeroAddress,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { arbitrumSepolia } from "viem/chains";
+import { arbitrumSepolia, sepolia } from "viem/chains";
 import {
   createKernelAccount,
   createKernelAccountClient,
@@ -34,7 +34,6 @@ import { useSign7702Authorization, useWallets } from "@privy-io/react-auth";
 
 // Chain configuration type
 interface ChainConfig {
-  configId: number; // Unique identifier for this configuration
   name: string;
   chain: Chain;
   bundlerRpc: string;
@@ -44,33 +43,22 @@ interface ChainConfig {
   receiver: string;
 }
 
-// Multi-chain configuration
-const CHAIN_CONFIGS: ChainConfig[] = [
-  // {
-  //   configId: 1,
-  //   name: "Sepolia",
-  //   chain: sepolia,
-  //   bundlerRpc: process.env.NEXT_PUBLIC_SEPOLIA_BUNDLER_RPC || "",
-  //   paymasterRpc: process.env.NEXT_PUBLIC_SEPOLIA_PAYMASTER_RPC || "",
-  //   tokenAddress: "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF",
-  //   tokenDecimals: 6,
-  //   receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
-  // },
-  {
-    configId: 2,
-    name: "Arbitrum Sepolia",
-    chain: arbitrumSepolia,
-    bundlerRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_BUNDLER_RPC || "",
-    paymasterRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_PAYMASTER_RPC || "",
-    tokenAddress: "0x5E2522c505A543fA2714c617E3Cd133a6Daa9627", // USDC on Arbitrum Sepolia
-    tokenDecimals: 6,
-    receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
-  },
-];
-
 const kernelVersion = KERNEL_V3_3;
 const entryPoint = getEntryPoint("0.7");
 const actionSelector = getActionSelector(entryPoint.version);
+
+// Mock backend storage
+interface BackendStorage {
+  sessionKeys: Record<string, string>; // walletAddress -> sessionPrivateKey
+  authorizations: Record<string, Record<number, any>>; // walletAddress -> chainId -> authorization
+  pluginSignatures: Record<string, Record<number, string>>; // walletAddress -> chainId -> signature
+}
+
+const mockBackendStorage: BackendStorage = {
+  sessionKeys: {},
+  authorizations: {},
+  pluginSignatures: {},
+};
 
 export const Zerodev = () => {
   const { signAuthorization } = useSign7702Authorization();
@@ -81,23 +69,42 @@ export const Zerodev = () => {
   const [amount, setAmount] = useState<string>("");
   const [txHash, setTxHash] = useState<string | null>(null);
 
+  const CHAIN_CONFIGS = new Map<number, ChainConfig>([
+    [sepolia.id, {
+      name: "Sepolia",
+      chain: sepolia,
+      bundlerRpc: process.env.NEXT_PUBLIC_SEPOLIA_BUNDLER_RPC || "",
+      paymasterRpc: process.env.NEXT_PUBLIC_SEPOLIA_PAYMASTER_RPC || "",
+      tokenAddress: "0xD46A1FF97544c8a254331C34eebEf2eA519Ad1FF",
+      tokenDecimals: 6,
+      receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
+    }],
+    [arbitrumSepolia.id, {
+      name: "Arbitrum Sepolia",
+      chain: arbitrumSepolia,
+      bundlerRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_BUNDLER_RPC || "",
+      paymasterRpc: process.env.NEXT_PUBLIC_ARBITRUM_SEPOLIA_PAYMASTER_RPC || "",
+      tokenAddress: "0x5E2522c505A543fA2714c617E3Cd133a6Daa9627", // USDC on Arbitrum Sepolia
+      tokenDecimals: 6,
+      receiver: "0x6d3a55F6f2923F1e00Ba0a3e611D98AdEAaC8Ee8",
+    }],
+  ]);
+
   // Multi-chain states
   const [balances, setBalances] = useState<Record<number, { balance: string; tokenName: string }>>({});
   const [receiverBalances, setReceiverBalances] = useState<Record<number, { balance: string; tokenName: string }>>({});
-  const [selectedChainForTx, setSelectedChainForTx] = useState<number>(CHAIN_CONFIGS[0].configId);
+  const [selectedChainForTx, setSelectedChainForTx] = useState<number>(sepolia.id);
 
   // States for frontend/backend separation
-  const [generatedSessionKey, setGeneratedSessionKey] = useState<string>("");
-  const [generatedApprovals, setGeneratedApprovals] = useState<Record<number, string>>({});
-  const [inputSessionKey, setInputSessionKey] = useState<string>("");
-  const [inputApproval, setInputApproval] = useState<string>("");
+  const [backendSavedAddresses, setBackendSavedAddresses] = useState<Record<number, string[]>>({});
+  const [selectedAddress, setSelectedAddress] = useState<string>("");
 
   // Find the embedded wallet
   const privyEmbeddedWallet = wallets.find(
     (wallet) => wallet.walletClientType === "privy"
   );
 
-  // Function to fetch token balance and name for all chains (Privy Wallet)
+  // Function to fetch token balance and name for all chains (用户充值地址)
   const fetchAllBalances = async () => {
     if (!privyEmbeddedWallet?.address) return;
 
@@ -105,7 +112,7 @@ export const Zerodev = () => {
 
     // Fetch balances for all chains in parallel
     await Promise.all(
-      CHAIN_CONFIGS.map(async (chainConfig) => {
+      Array.from(CHAIN_CONFIGS.entries()).map(async ([chainId, chainConfig]) => {
         try {
           const publicClient = createPublicClient({
             chain: chainConfig.chain,
@@ -128,13 +135,13 @@ export const Zerodev = () => {
 
           // Convert balance from wei to readable format
           const formattedBalance = (Number(balance) / Math.pow(10, chainConfig.tokenDecimals)).toFixed(6);
-          newBalances[chainConfig.configId] = {
+          newBalances[chainId] = {
             balance: formattedBalance,
             tokenName: name as string,
           };
         } catch (error) {
           console.error(`Failed to fetch balance for ${chainConfig.name}:`, error);
-          newBalances[chainConfig.configId] = {
+          newBalances[chainId] = {
             balance: "Error",
             tokenName: "Token",
           };
@@ -151,7 +158,7 @@ export const Zerodev = () => {
 
     // Fetch receiver balances for all chains in parallel
     await Promise.all(
-      CHAIN_CONFIGS.map(async (chainConfig) => {
+      Array.from(CHAIN_CONFIGS.entries()).map(async ([chainId, chainConfig]) => {
         try {
           const publicClient = createPublicClient({
             chain: chainConfig.chain,
@@ -174,13 +181,13 @@ export const Zerodev = () => {
 
           // Convert balance from wei to readable format
           const formattedBalance = (Number(balance) / Math.pow(10, chainConfig.tokenDecimals)).toFixed(6);
-          newReceiverBalances[chainConfig.configId] = {
+          newReceiverBalances[chainId] = {
             balance: formattedBalance,
             tokenName: name as string,
           };
         } catch (error) {
           console.error(`Failed to fetch receiver balance for ${chainConfig.name}:`, error);
-          newReceiverBalances[chainConfig.configId] = {
+          newReceiverBalances[chainId] = {
             balance: "Error",
             tokenName: "Token",
           };
@@ -196,6 +203,7 @@ export const Zerodev = () => {
     if (privyEmbeddedWallet?.address) {
       fetchAllBalances(); // Initial fetch
       fetchReceiverBalances(); // Initial fetch for receiver balances
+      updateBackendSavedAddresses(); // Initial fetch for backend saved addresses
 
       const interval = setInterval(() => {
         fetchAllBalances();
@@ -207,7 +215,7 @@ export const Zerodev = () => {
   }, [privyEmbeddedWallet?.address]);
 
   const getTxChainConfig = () => {
-    return CHAIN_CONFIGS.find(config => config.configId === selectedChainForTx) || CHAIN_CONFIGS[0];
+    return CHAIN_CONFIGS.get(selectedChainForTx) || CHAIN_CONFIGS.get(sepolia.id)!;
   };
 
   // Early return conditions after all hooks have been called
@@ -216,41 +224,285 @@ export const Zerodev = () => {
     return null;
   }
 
-  // Check if at least one chain has valid RPC configuration
-  const hasValidChainConfig = CHAIN_CONFIGS.some(config => config.bundlerRpc && config.paymasterRpc);
-  if (!hasValidChainConfig) {
-    console.error("❌ Missing required environment variables for all chains");
-    alert("Missing required environment variables. Please check your chain RPC configurations.");
-    return null;
-  }
+  // Backend function: Generate session key and signing data
+  const getDataToSign = async (walletAddress: string) => {
+    // Generate session key for this wallet
+    const sessionPrivateKey = generatePrivateKey();
+    const sessionKeySigner = await toECDSASigner({
+      signer: privateKeyToAccount(sessionPrivateKey),
+    });
 
-  const frontEndGenerateApproval = async () => {
+    mockBackendStorage.sessionKeys[walletAddress] = sessionPrivateKey;
+
+    const authToSignData: Record<number, any> = {};
+    const pluginsToSignData: Record<number, any> = {};
+
+    for (const [chainId, chainConfig] of CHAIN_CONFIGS.entries()) {
+      if (!chainConfig.bundlerRpc || !chainConfig.paymasterRpc) {
+        continue;
+      }
+
+      try {
+        const publicClient = createPublicClient({
+          chain: chainConfig.chain,
+          transport: http(),
+        });
+
+        // Prepare permission policy for this chain
+        const callPolicy = toCallPolicy({
+          policyVersion: CallPolicyVersion.V0_0_4,
+          permissions: [
+            {
+              target: chainConfig.tokenAddress as `0x${string}`,
+              valueLimit: BigInt(0),
+              abi: erc20Abi,
+              functionName: "transfer",
+              args: [
+                {
+                  condition: ParamCondition.NOT_EQUAL,
+                  value: zeroAddress,
+                },
+                {
+                  condition: ParamCondition.GREATER_THAN,
+                  value: 0n,
+                },
+              ],
+            },
+          ],
+        });
+
+        const permissionPlugin = await toPermissionValidator(publicClient, {
+          entryPoint,
+          kernelVersion,
+          signer: sessionKeySigner,
+          policies: [callPolicy],
+        });
+
+        // Generate auth to sign data
+        const authToSign = {
+          contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
+          chainId: chainConfig.chain.id,
+        };
+        authToSignData[chainConfig.chain.id] = authToSign;
+
+        // Generate plugins to sign data
+        const pluginsToSign = await getPluginsEnableTypedDataV2({
+          accountAddress: walletAddress as `0x${string}`,
+          chainId: chainConfig.chain.id,
+          kernelVersion: kernelVersion,
+          action: { selector: actionSelector, address: zeroAddress },
+          hook: undefined,
+          validator: permissionPlugin,
+          validatorNonce: 1,
+        });
+        pluginsToSignData[chainConfig.chain.id] = pluginsToSign;
+
+      } catch (error) {
+        console.error(`Failed to prepare signing data for ${chainConfig.name}:`, error);
+      }
+    }
+
+    return { authToSignData, pluginsToSignData };
+  };
+
+  // Backend function: Save authorizations and plugin signatures
+  const submitSignatures = async (walletAddress: string, authorizations: Record<number, any>, pluginSignatures: Record<number, string>) => {
+    mockBackendStorage.authorizations[walletAddress] = authorizations;
+    mockBackendStorage.pluginSignatures[walletAddress] = pluginSignatures;
+
+    // Update backend saved addresses
+    await updateBackendSavedAddresses();
+
+    return { success: true };
+  };
+
+  // Backend function: Get saved addresses
+  const getSavedAddresses = async () => {
+    const savedAddresses: Record<number, string[]> = {};
+
+    for (const [walletAddress, chainAuths] of Object.entries(mockBackendStorage.authorizations)) {
+      for (const chainId of Object.keys(chainAuths)) {
+        const chainIdNum = Number(chainId);
+        if (!savedAddresses[chainIdNum]) {
+          savedAddresses[chainIdNum] = [];
+        }
+        if (!savedAddresses[chainIdNum].includes(walletAddress)) {
+          savedAddresses[chainIdNum].push(walletAddress);
+        }
+      }
+    }
+
+    console.log("savedAddresses:", savedAddresses);
+
+    return savedAddresses;
+  };
+
+  // Backend function: Send transaction
+  const sendTransaction = async (chainId: number, address: string, amount: string) => {
+    const chainConfig = CHAIN_CONFIGS.get(chainId);
+    if (!chainConfig) {
+      throw new Error("Chain not found");
+    }
+
+    // Check if we have authorization and plugin signature for this address and chain
+    const authorization = mockBackendStorage.authorizations[address]?.[chainId];
+    const pluginSignature = mockBackendStorage.pluginSignatures[address]?.[chainId];
+    const sessionPrivateKey = mockBackendStorage.sessionKeys[address];
+
+    if (!authorization || !pluginSignature || !sessionPrivateKey) {
+      throw new Error("Missing authorization or plugin signature for this address and chain");
+    }
+
+    // Build session key account and send transaction
+    const sessionKeySigner = await toECDSASigner({
+      signer: privateKeyToAccount(sessionPrivateKey as Hex),
+    });
+
+    const publicClient = createPublicClient({
+      chain: chainConfig.chain,
+      transport: http(),
+    });
+
+    const callPolicy = toCallPolicy({
+      policyVersion: CallPolicyVersion.V0_0_4,
+      permissions: [
+        {
+          target: chainConfig.tokenAddress as `0x${string}`,
+          valueLimit: BigInt(0),
+          abi: erc20Abi,
+          functionName: "transfer",
+          args: [
+            {
+              condition: ParamCondition.NOT_EQUAL,
+              value: zeroAddress,
+            },
+            {
+              condition: ParamCondition.GREATER_THAN,
+              value: 0n,
+            },
+          ],
+        },
+      ],
+    });
+
+    const modularPermissionPlugin = await toPermissionValidator(publicClient, {
+      signer: sessionKeySigner,
+      policies: [callPolicy],
+      entryPoint,
+      kernelVersion
+    });
+
+    const { index, validatorInitData, useMetaFactory } =
+      decodeParamsFromInitCode("0x", kernelVersion);
+
+    const kernelPluginManager = await toKernelPluginManager(publicClient, {
+      regular: modularPermissionPlugin,
+      pluginEnableSignature: pluginSignature as Hex,
+      validatorInitData,
+      action: { selector: actionSelector, address: zeroAddress },
+      entryPoint,
+      kernelVersion,
+      isPreInstalled: false,
+      ...{
+        validAfter: 0,
+        validUntil: 0
+      }
+    });
+
+    const sessionKeyAccount = await createKernelAccount(publicClient, {
+      entryPoint,
+      kernelVersion,
+      plugins: kernelPluginManager,
+      index,
+      address: address as `0x${string}`,
+      useMetaFactory,
+      eip7702Auth: authorization
+    });
+
+    const kernelPaymaster = createZeroDevPaymasterClient({
+      chain: chainConfig.chain,
+      transport: http(chainConfig.paymasterRpc),
+    });
+
+    const kernelClient = createKernelAccountClient({
+      account: sessionKeyAccount,
+      chain: chainConfig.chain,
+      bundlerTransport: http(chainConfig.bundlerRpc),
+      paymaster: kernelPaymaster,
+    });
+
+    const call = [
+      {
+        to: chainConfig.tokenAddress as `0x${string}`,
+        value: BigInt(0),
+        data: encodeFunctionData({
+          abi: erc20Abi,
+          functionName: "transfer",
+          args: [chainConfig.receiver as `0x${string}`, parseUnits(amount, chainConfig.tokenDecimals)],
+        }),
+      },
+    ];
+
+    const userOpHash = await kernelClient.sendUserOperation({
+      callData: await sessionKeyAccount.encodeCalls(call),
+    });
+
+    console.log("userOp hash:", userOpHash);
+
+    const _receipt = await kernelClient.waitForUserOperationReceipt({
+      hash: userOpHash,
+    });
+
+    return _receipt.receipt.transactionHash;
+  };
+
+  // Function to update backend saved addresses
+  const updateBackendSavedAddresses = async () => {
+    try {
+      const savedAddresses = await getSavedAddresses();
+      setBackendSavedAddresses(savedAddresses);
+    } catch (error) {
+      console.error("Failed to update backend saved addresses:", error);
+    }
+  };
+
+  const frontEndJustSign = async () => {
+    if (!privyEmbeddedWallet?.address) {
+      alert("请先连接钱包");
+      return;
+    }
+
     setLoading(true);
 
     try {
-      // Step1: Create session key once for all chains
-      const sessionPrivateKey = generatePrivateKey();
-      const sessionKeySigner = await toECDSASigner({
-        signer: privateKeyToAccount(sessionPrivateKey),
-      });
+      // Step 1: Call backend to get signing data
+      const { authToSignData, pluginsToSignData } = await getDataToSign(privyEmbeddedWallet.address);
 
-      // Step2: Generate approvals for all supported chains
-      const approvals: Record<number, string> = {};
-      const results: string[] = [];
+      // Step 2: Sign the data for all chains (frontend only signs what it receives)
+      const authorizations: Record<number, any> = {};
+      const pluginSignatures: Record<number, string> = {};
 
-      for (const chainConfig of CHAIN_CONFIGS) {
+      // Sign authorization data for each chain
+      for (const [chainIdStr, authData] of Object.entries(authToSignData)) {
         try {
-          // Skip chains without proper RPC configuration
-          if (!chainConfig.bundlerRpc || !chainConfig.paymasterRpc) {
-            console.warn(`⚠️ Skipping ${chainConfig.name} - missing RPC configuration`);
+          const chainId = Number(chainIdStr);
+          // Privy SDK should provides signAuthorization method
+          const authorization = await signAuthorization(authData);
+          authorizations[chainId] = authorization;
+        } catch (error) {
+          console.error(`❌ Failed to sign authorization for chain ${chainIdStr}:`, error);
+        }
+      }
+
+      // Sign plugin data for each chain
+      for (const [chainIdStr, pluginData] of Object.entries(pluginsToSignData)) {
+        try {
+          const chainId = Number(chainIdStr);
+          const chainConfig = CHAIN_CONFIGS.get(chainId);
+          if (!chainConfig) {
+            console.error(`❌ Chain config not found for chainId: ${chainId}`);
             continue;
           }
-
-          // Prepare clients for this chain
-          const publicClient = createPublicClient({
-            chain: chainConfig.chain,
-            transport: http(),
-          });
 
           const privyWallet = createWalletClient({
             account: privyEmbeddedWallet.address as Hex,
@@ -258,144 +510,19 @@ export const Zerodev = () => {
             transport: custom(await privyEmbeddedWallet.getEthereumProvider()),
           });
 
-          // Prepare permission policy for this chain
-          const callPolicy = toCallPolicy({
-            policyVersion: CallPolicyVersion.V0_0_4,
-            permissions: [
-              {
-                target: chainConfig.tokenAddress as `0x${string}`,
-                valueLimit: BigInt(0),
-                abi: erc20Abi,
-                functionName: "transfer",
-                args: [
-                  {
-                    condition: ParamCondition.NOT_EQUAL,
-                    value: zeroAddress,
-                  },
-                  {
-                    condition: ParamCondition.GREATER_THAN,
-                    value: 0n,
-                  },
-                ],
-              },
-            ],
-          });
-
-          const permissionPlugin = await toPermissionValidator(publicClient, {
-            entryPoint,
-            kernelVersion,
-            signer: sessionKeySigner,
-            policies: [callPolicy],
-          });
-
-          // Generate authorization for this chain
-          const authToSign = {
-            contractAddress: KernelVersionToAddressesMap[kernelVersion].accountImplementationAddress,
-            chainId: chainConfig.chain.id,
-          };
-          const authorization = await signAuthorization(authToSign);
-
-          // Manual sign
-          const pluginsToSign = await getPluginsEnableTypedDataV2({
-            accountAddress: privyWallet.account.address,
-            chainId: chainConfig.chain.id,
-            kernelVersion: kernelVersion,
-            action: { selector: actionSelector, address: zeroAddress },
-            hook: undefined,
-            validator: permissionPlugin,
-            validatorNonce: 1,
-          });
-          const pluginEnableSignature = await privyWallet.signTypedData(pluginsToSign);
-
-          // Build sessionKeyAccount with authorization and pluginEnableSignature
-          const modularPermissionPlugin = await toPermissionValidator(publicClient, {
-            signer: sessionKeySigner,
-            policies: [callPolicy],
-            entryPoint,
-            kernelVersion
-          })
-
-          const { index, validatorInitData, useMetaFactory } =
-            decodeParamsFromInitCode("0x", kernelVersion)
-
-          const kernelPluginManager = await toKernelPluginManager(publicClient, {
-            regular: modularPermissionPlugin,
-            pluginEnableSignature: pluginEnableSignature,
-            validatorInitData,
-            action: { selector: actionSelector, address: zeroAddress },
-            entryPoint,
-            kernelVersion,
-            isPreInstalled: false,
-            ...{
-              validAfter: 0,
-              validUntil: 0
-            }
-          })
-
-          const sessionKeyAccountBackend = await createKernelAccount(publicClient, {
-            entryPoint,
-            kernelVersion,
-            plugins: kernelPluginManager,
-            index,
-            address: privyWallet.account.address,
-            useMetaFactory,
-            eip7702Auth: authorization
-          })
-
-          const kernelPaymaster = createZeroDevPaymasterClient({
-            chain: chainConfig.chain,
-            transport: http(chainConfig.paymasterRpc),
-          });
-          const kernelClient = createKernelAccountClient({
-            account: sessionKeyAccountBackend,
-            chain: chainConfig.chain,
-            bundlerTransport: http(chainConfig.bundlerRpc),
-            paymaster: kernelPaymaster,
-          });
-
-          const call = [
-            {
-              to: chainConfig.tokenAddress as `0x${string}`,
-              value: BigInt(0),
-              data: encodeFunctionData({
-                abi: erc20Abi,
-                functionName: "transfer",
-                args: [chainConfig.receiver as `0x${string}`, parseUnits(amount, chainConfig.tokenDecimals)],
-              }),
-            },
-          ];
-
-          const userOpHash = await kernelClient.sendUserOperation({
-            callData: await sessionKeyAccountBackend.encodeCalls(call),
-          });
-
-          console.log("userOp hash:", userOpHash);
-
-          const _receipt = await kernelClient.waitForUserOperationReceipt({
-            hash: userOpHash,
-          });
-          const txHash = _receipt.receipt.transactionHash;
-
-          setTxHash(txHash);
-          console.log(`✅ Transaction sent successfully on ${chainConfig.name}:`, txHash);
-
-        } catch (chainError) {
-          console.error(`❌ Failed to generate approval for ${chainConfig.name}:`, chainError);
-          results.push(`❌ ${chainConfig.name}: 生成失败`);
+          const pluginEnableSignature = await privyWallet.signTypedData(pluginData);
+          pluginSignatures[chainId] = pluginEnableSignature;
+        } catch (error) {
+          console.error(`❌ Failed to sign plugin data for chain ${chainIdStr}:`, error);
         }
       }
 
-      // Save generated data for display
-      setGeneratedSessionKey(sessionPrivateKey);
-      setGeneratedApprovals(approvals);
+      // Step 3: Call backend to submit signatures
+      await submitSignatures(privyEmbeddedWallet.address, authorizations, pluginSignatures);
 
-      console.log("sessionPrivateKey:", sessionPrivateKey);
-      console.log("Generated approvals for chains:", Object.keys(approvals).map(id =>
-        CHAIN_CONFIGS.find(c => c.configId === Number(id))?.name
-      ).join(', '));
-
+      console.log("✅ Authorization and plugin signatures generated successfully");
     } catch (e) {
-      console.error("❌ frontEndGenerateApproval failed:", e);
+      console.error("❌ frontEndJustSign failed:", e);
       const error = e as any;
 
       // Show user-friendly error message
@@ -413,13 +540,8 @@ export const Zerodev = () => {
   };
 
   const backEndSendTx = async () => {
-    if (!inputSessionKey || inputSessionKey === "0x") {
-      alert("请输入 Session Private Key");
-      return;
-    }
-
-    if (!inputApproval) {
-      alert("请输入 Approval 数据");
+    if (!selectedAddress) {
+      alert("请选择地址");
       return;
     }
 
@@ -432,16 +554,23 @@ export const Zerodev = () => {
     setTxHash(null);
 
     try {
+      // Call backend to send transaction
+      const resultTxHash = await sendTransaction(selectedChainForTx, selectedAddress, amount);
+      setTxHash(resultTxHash);
+
+      console.log("✅ Transaction sent successfully:", resultTxHash);
+      alert("交易发送成功！");
+
     } catch (e) {
       console.error("❌ backEndSendTx failed:", e);
       const error = e as any;
 
       // Show user-friendly error message
-      let errorMessage = "Transaction failed. ";
+      let errorMessage = "交易发送失败。";
       if (error?.message) {
-        errorMessage += `Error: ${error.message}`;
+        errorMessage += `错误: ${error.message}`;
       } else {
-        errorMessage += "Please check the console for details.";
+        errorMessage += "请查看控制台获取详细信息。";
       }
       alert(errorMessage);
     } finally {
@@ -458,13 +587,13 @@ export const Zerodev = () => {
           <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg border border-blue-200">
             <div className="flex items-center mb-3">
               <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-              <h3 className="text-base font-bold text-gray-800">Privy Wallet</h3>
+              <h3 className="text-base font-bold text-gray-800">用户充值地址</h3>
             </div>
 
             <div className="space-y-3">
               <div className="bg-white p-3 rounded border border-gray-200">
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-gray-600">钱包地址</span>
+                  <span className="text-xs font-medium text-gray-600">地址</span>
                   <button
                     onClick={() => navigator.clipboard.writeText(privyEmbeddedWallet.address)}
                     className="text-xs text-blue-600 hover:text-blue-800 underline"
@@ -480,14 +609,14 @@ export const Zerodev = () => {
               {/* Multi-chain Token Balances */}
               <div className="bg-white p-3 rounded border border-gray-200">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-medium text-gray-600">代币余额</span>
+                  <span className="text-xs font-medium text-gray-600">余额</span>
                   <span className="text-xs text-gray-500">所有链</span>
                 </div>
                 <div className="space-y-1">
-                  {CHAIN_CONFIGS.map((chainConfig) => {
-                    const chainBalance = balances[chainConfig.configId];
+                  {Array.from(CHAIN_CONFIGS.entries()).map(([chainId, chainConfig]) => {
+                    const chainBalance = balances[chainId];
                     return (
-                      <div key={chainConfig.configId} className="flex items-center justify-between py-1 border-b border-gray-100 last:border-b-0">
+                      <div key={chainId} className="flex items-center justify-between py-1 border-b border-gray-100 last:border-b-0">
                         <div className="flex items-center">
                           <div className="w-1.5 h-1.5 bg-blue-500 rounded-full mr-2"></div>
                           <span className="text-xs text-gray-700">{chainConfig.name}</span>
@@ -508,14 +637,14 @@ export const Zerodev = () => {
         <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 rounded-lg border border-amber-200">
           <div className="flex items-center mb-3">
             <div className="w-2 h-2 bg-amber-500 rounded-full mr-2"></div>
-            <h3 className="text-base font-bold text-gray-800">存入地址和余额</h3>
+            <h3 className="text-base font-bold text-gray-800">金库地址</h3>
           </div>
 
           <div className="space-y-3">
-            {CHAIN_CONFIGS.map((chainConfig) => {
-              const chainBalance = receiverBalances[chainConfig.configId];
+            {Array.from(CHAIN_CONFIGS.entries()).map(([chainId, chainConfig]) => {
+              const chainBalance = receiverBalances[chainId];
               return (
-                <div key={chainConfig.configId} className="bg-white p-3 rounded border border-gray-200">
+                <div key={chainId} className="bg-white p-3 rounded border border-gray-200">
                   <div className="flex items-center mb-2">
                     <div className="w-1.5 h-1.5 bg-amber-500 rounded-full mr-2"></div>
                     <span className="text-xs font-semibold text-gray-800">{chainConfig.name}</span>
@@ -525,7 +654,7 @@ export const Zerodev = () => {
                     {/* Deposit Address */}
                     <div className="border-b border-gray-100 pb-2">
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs text-gray-600">存入地址</span>
+                        <span className="text-xs text-gray-600">地址</span>
                         <button
                           onClick={() => navigator.clipboard.writeText(chainConfig.receiver)}
                           className="text-xs text-blue-600 hover:text-blue-800 underline"
@@ -540,7 +669,7 @@ export const Zerodev = () => {
 
                     {/* Token Balance */}
                     <div className="flex items-center justify-between py-1">
-                      <span className="text-xs text-gray-600">代币余额</span>
+                      <span className="text-xs text-gray-600">余额</span>
                       <span className="text-xs font-medium text-gray-800">
                         {chainBalance ? `${chainBalance.balance} ${chainBalance.tokenName}` : "加载中..."}
                       </span>
@@ -560,92 +689,36 @@ export const Zerodev = () => {
         <div className="p-4 bg-gradient-to-r from-purple-50 to-violet-50 rounded-lg border border-purple-200">
           <div className="flex items-center mb-3">
             <div className="w-2 h-2 bg-purple-500 rounded-full mr-2"></div>
-            <h3 className="text-base font-bold text-purple-700">前端操作：生成授权</h3>
+            <h3 className="text-base font-bold text-purple-700">前端操作：提交授权</h3>
           </div>
 
           <div className="space-y-3">
             <div className="bg-white p-3 rounded border border-gray-200">
-              <p className="text-xs text-gray-600 mb-3">
-                点击下方按钮将为所有支持的链生成授权数据，使用同一个 Session Key。
-              </p>
               <div className="text-xs text-gray-500">
-                支持的链: {CHAIN_CONFIGS.filter(c => c.bundlerRpc && c.paymasterRpc).map(c => c.name).join(', ')}
+                支持的链: {Array.from(CHAIN_CONFIGS.values()).map(c => c.name).join(', ')}
               </div>
             </div>
 
             <div className="flex gap-2">
               <button
-                onClick={frontEndGenerateApproval}
-                disabled={loading || !CHAIN_CONFIGS.some(c => c.bundlerRpc && c.paymasterRpc)}
+                onClick={frontEndJustSign}
+                disabled={loading}
                 className="flex items-center px-4 py-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white text-xs font-medium rounded shadow-sm transition-colors duration-200"
               >
                 {loading && (
                   <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin mr-1"></div>
                 )}
-                {loading ? "生成多链授权中..." : "生成多链授权"}
+                {loading ? "提交授权中..." : "提交授权"}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Display Generated Data */}
-        {generatedSessionKey && Object.keys(generatedApprovals).length > 0 && (
-          <div className="p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg border border-green-200">
-            <div className="flex items-center mb-3">
-              <div className="w-2 h-2 bg-green-500 rounded-full mr-2"></div>
-              <h3 className="text-base font-bold text-green-700">
-                多链授权生成成功！({Object.keys(generatedApprovals).length} 条链)
-              </h3>
-            </div>
-
-            <div className="space-y-3">
-              {/* Session Key - shared across all chains */}
-              <div className="bg-white p-3 rounded border border-gray-200">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-gray-600">Session Private Key (通用)</span>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(generatedSessionKey)}
-                    className="text-xs text-blue-600 hover:text-blue-800 underline"
-                  >
-                    复制
-                  </button>
-                </div>
-                <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all">
-                  {generatedSessionKey}
-                </div>
-              </div>
-
-              {/* Approvals for each chain */}
-              {Object.entries(generatedApprovals).map(([chainId, approval]) => {
-                const chainConfig = CHAIN_CONFIGS.find(c => c.configId === Number(chainId));
-                return (
-                  <div key={chainId} className="bg-white p-3 rounded border border-gray-200">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-medium text-gray-600">
-                        {chainConfig?.name} Approval Data
-                      </span>
-                      <button
-                        onClick={() => navigator.clipboard.writeText(approval)}
-                        className="text-xs text-blue-600 hover:text-blue-800 underline"
-                      >
-                        复制
-                      </button>
-                    </div>
-                    <div className="font-mono text-xs text-gray-800 bg-gray-50 p-2 rounded break-all max-h-24 overflow-y-auto">
-                      {approval}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
         {/* Backend: Send Transaction Section */}
         <div className="p-4 bg-gradient-to-r from-blue-50 to-cyan-50 rounded-lg border border-blue-200">
           <div className="flex items-center mb-3">
             <div className="w-2 h-2 bg-blue-500 rounded-full mr-2"></div>
-            <h3 className="text-base font-bold text-blue-700">后端操作：发送交易</h3>
+            <h3 className="text-base font-bold text-blue-700">后端操作：发起转账</h3>
           </div>
 
           <div className="space-y-3">
@@ -656,44 +729,44 @@ export const Zerodev = () => {
               </label>
               <select
                 value={selectedChainForTx}
-                onChange={(e) => setSelectedChainForTx(Number(e.target.value))}
+                onChange={(e) => {
+                  setSelectedChainForTx(Number(e.target.value));
+                  setSelectedAddress(""); // Reset address selection when chain changes
+                }}
                 className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 disabled={sendingTx}
               >
-                {CHAIN_CONFIGS.map((chainConfig) => (
-                  <option key={chainConfig.configId} value={chainConfig.configId}>
+                {Array.from(CHAIN_CONFIGS.entries()).map(([chainId, chainConfig]) => (
+                  <option key={chainId} value={chainId}>
                     {chainConfig.name}
                   </option>
                 ))}
               </select>
             </div>
 
+            {/* Address Selection */}
             <div className="bg-white p-3 rounded border border-gray-200">
               <label className="block text-xs font-medium text-gray-700 mb-2">
-                Session Private Key
+                选择地址 (仅显示已授权的地址)
               </label>
-              <textarea
-                placeholder="请粘贴 Session Private Key..."
-                value={inputSessionKey}
-                onChange={(e) => setInputSessionKey(e.target.value)}
-                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
-                rows={2}
+              <select
+                value={selectedAddress}
+                onChange={(e) => setSelectedAddress(e.target.value)}
+                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
                 disabled={sendingTx}
-              />
-            </div>
-
-            <div className="bg-white p-3 rounded border border-gray-200">
-              <label className="block text-xs font-medium text-gray-700 mb-2">
-                Approval Data
-              </label>
-              <textarea
-                placeholder="请粘贴 Approval 数据..."
-                value={inputApproval}
-                onChange={(e) => setInputApproval(e.target.value)}
-                className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none font-mono"
-                rows={3}
-                disabled={sendingTx}
-              />
+              >
+                <option value="">请选择地址</option>
+                {backendSavedAddresses[selectedChainForTx]?.map((address) => (
+                  <option key={address} value={address}>
+                    {address}
+                  </option>
+                ))}
+              </select>
+              {(!backendSavedAddresses[selectedChainForTx] || backendSavedAddresses[selectedChainForTx].length === 0) && (
+                <div className="text-xs text-gray-500 mt-1">
+                  该链暂无已授权的地址，请先生成授权
+                </div>
+              )}
             </div>
 
             <div className="bg-white p-3 rounded border border-gray-200">
@@ -711,13 +784,13 @@ export const Zerodev = () => {
                 />
                 <button
                   onClick={backEndSendTx}
-                  disabled={sendingTx || !amount || !inputSessionKey || !inputApproval || !getTxChainConfig().bundlerRpc || !getTxChainConfig().paymasterRpc}
+                  disabled={sendingTx || !amount || !selectedAddress}
                   className="flex items-center px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white text-xs font-medium rounded shadow-sm transition-colors duration-200"
                 >
                   {sendingTx && (
                     <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin mr-1"></div>
                   )}
-                  {sendingTx ? "发送中..." : `发送交易`}
+                  {sendingTx ? "发送中..." : `发起转账`}
                 </button>
               </div>
             </div>
